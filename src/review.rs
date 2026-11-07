@@ -2055,6 +2055,7 @@ mod recursive_tests {
     use super::*;
     use crate::registry::{Checksum, ChecksumAlg, Package, Release};
     use crate::store::BaselineStore;
+    use crate::test_support::has_finding;
     use std::collections::HashMap;
 
     struct FakeRegistry {
