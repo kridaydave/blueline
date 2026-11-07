@@ -324,6 +324,8 @@ jobs:
         env:
           LOCKFILE_CHANGED: ${{ steps.changed.outputs.changed }}
           SCAN_OUTCOME: ${{ steps.scan.outcome }}
+          SCAN_EXIT_CODE: ${{ steps.scan.outputs.scan-exit-code }}
+          REPORT_PATH: ${{ steps.scan.outputs.report-path }}
         run: |
           python3 - <<'PY'
           import json, os, sys
@@ -331,7 +333,10 @@ jobs:
 
           lockfile_changed = os.environ.get("LOCKFILE_CHANGED") == "true"
           scan_outcome = os.environ.get("SCAN_OUTCOME", "unknown")
+          scan_exit = os.environ.get("SCAN_EXIT_CODE", "")
+          report_path = os.environ.get("REPORT_PATH") or "blueline-dogfood.json"
           summary = Path(os.environ.get("GITHUB_STEP_SUMMARY", "")) if os.environ.get("GITHUB_STEP_SUMMARY") else None
+          Path("artifacts").mkdir(exist_ok=True)
 
           def add_summary(text):
               if summary:
@@ -340,12 +345,12 @@ jobs:
 
           def fail(code, msg):
               print(f"::error title=P3 gate.dogfood.health::{msg}")
-              add_summary(f"## P3 gate.dogfood.health — npm dogfood\n\n**FAIL:** {msg}\n\n- scan outcome: `{scan_outcome}`\n- lockfile changed: `{lockfile_changed}`\n")
+              add_summary(f"## P3 gate.dogfood.health — npm dogfood\n\n**FAIL:** {msg}\n\n- scan outcome: `{scan_outcome}` (exit `{scan_exit}`)\n- report path: `{report_path}`\n- lockfile changed: `{lockfile_changed}`\n")
               sys.exit(code)
 
-          report = Path("blueline-dogfood.json")
+          report = Path(report_path)
           if not report.exists():
-              fail(1, f"scan produced no report file (scan outcome={scan_outcome}); scanner health cannot be verified")
+              fail(1, f"scan produced no report file (scan outcome={scan_outcome}, exit={scan_exit}); scanner health cannot be verified")
           try:
               r = json.loads(report.read_text(encoding="utf-8"))
           except Exception as e:
@@ -402,6 +407,13 @@ jobs:
               for name, version, band in findings:
                   add_summary(f"| {name} | {version} | {band} |")
               add_summary("")
+              risk = {
+                  "schema_version": 1, "kind": "gate", "priority": "P4", "category": "gate.dogfood.risk",
+                  "job": "dogfood", "result": "success", "reason": f"{len(findings)} HIGH/BLOCK finding(s); scanner healthy (not gating)",
+                  "evidence": report_path, "fix_first": "Review findings; many first-party binary bumps are expected, but investigate unexpected packages/changes.",
+                  "details": {"findings": [{"name": n, "version": v, "band": b} for n, v, b in findings], "scan_outcome": scan_outcome, "scan_exit_code": scan_exit},
+              }
+              Path("artifacts/gate-dogfood-risk.json").write_text(json.dumps(risk, indent=2, sort_keys=True) + "\n", encoding="utf-8")
               print(f"::notice title=P4 gate.dogfood.risk::{len(findings)} HIGH/BLOCK finding(s) recorded; scanner healthy (not gating)")
           PY
       - name: Publish dogfood gate summary
@@ -425,10 +437,11 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: blueline-dogfood-report
+          name: blueline-gate-dogfood-npm
           path: |
             blueline-dogfood.json
             artifacts/gate-dogfood-npm.json
+            artifacts/gate-dogfood-risk.json
           if-no-files-found: warn
 
   dogfood-cargo:
@@ -495,10 +508,14 @@ jobs:
         if: always()
         env:
           CHANGED: ${{ steps.changed.outputs.changed }}
-          RESULT: ${{ steps.dogfood_cargo.outcome }}
+          STEP_RESULT: ${{ steps.dogfood_cargo.outcome }}
+          JOB_STATUS: ${{ job.status }}
         shell: bash
         run: |
-          result="${RESULT:-skipped}"
+          result="${STEP_RESULT:-}"
+          if [ -z "$result" ]; then
+            [ "${CHANGED}" = "true" ] && result="${JOB_STATUS:-failure}" || result="skipped"
+          fi
           reason="Cargo.lock changed=${CHANGED}. "
           if [ "${CHANGED}" != "true" ]; then
             reason="${reason}Scan skipped because lockfile did not change."
@@ -520,7 +537,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: blueline-dogfood-cargo-report
+          name: blueline-gate-dogfood-cargo
           path: |
             artifacts/gate-dogfood-cargo.json
             artifacts/dogfood-cargo.log
@@ -653,6 +670,18 @@ jobs:
             "${args[@]}" \
             --exclude-re "$BLUELINE_MUTANTS_EXCLUDE" \
             --in-place --baseline=skip --timeout 300
+      - name: Snapshot pass 1 evidence
+        if: always() && steps.mutants_pass1.outcome != 'skipped'
+        run: |
+          mkdir -p artifacts/pass1
+          if [ -d mutants.out ]; then cp -a mutants.out/. artifacts/pass1/ 2>/dev/null || true; fi
+          [ -f mutants.out ] && cp mutants.out artifacts/pass1/mutants.out.txt 2>/dev/null || true
+      - name: Snapshot pass 2 evidence
+        if: always() && steps.mutants_pass2.outcome != 'skipped'
+        run: |
+          mkdir -p artifacts/pass2
+          if [ -d mutants.out ]; then cp -a mutants.out/. artifacts/pass2/ 2>/dev/null || true; fi
+          [ -f mutants.out ] && cp mutants.out artifacts/pass2/mutants.out.txt 2>/dev/null || true
       - name: Collect mutation shard summary
         if: always()
         env:
@@ -662,23 +691,18 @@ jobs:
           DIFF_BASE: ${{ steps.diff.outputs.base }}
         run: |
           mkdir -p artifacts
-          # Preserve mutants.out as raw evidence (may reflect latest pass).
-          [ -f mutants.out ] && cp mutants.out artifacts/mutants.out || true
-          for f in mutants.out/mutants.json mutants.out/outcomes.json; do
-            [ -f "$f" ] && cp "$f" "artifacts/$(basename "$f")" || true
-          done
           python3 scripts/ci/mutants_shard_summary.py \
             --event pull_request \
             --shard '${{ matrix.shard }}' \
             --shard-total 32 \
             --job-result "${JOB_STATUS:-unknown}" \
             --diff-base "${DIFF_BASE}" \
-            --pass "pass1_glob=${PASS1}" \
-            --pass "pass2_explicit=${PASS2}" \
-            --mutants-out artifacts/mutants.out \
-            --mutants-out mutants.out \
-            --outcomes-json artifacts/outcomes.json \
-            --outcomes-json mutants.out/outcomes.json \
+            --pass "pass1_glob=${PASS1:-unknown}" \
+            --pass "pass2_explicit=${PASS2:-unknown}" \
+            --mutants-out artifacts/pass1/mutants.out.txt \
+            --mutants-out artifacts/pass2/mutants.out.txt \
+            --outcomes-json artifacts/pass1/outcomes.json \
+            --outcomes-json artifacts/pass2/outcomes.json \
             --artifact-name mutants-pr-${{ matrix.shard }} \
             --out artifacts/mutants-shard-summary.json
       - uses: actions/upload-artifact@v4
@@ -687,10 +711,8 @@ jobs:
           name: mutants-pr-${{ matrix.shard }}
           path: |
             artifacts/mutants-shard-summary.json
-            artifacts/mutants.out
-            artifacts/outcomes.json
-            artifacts/mutants.json
-            mutants.out
+            artifacts/pass1/
+            artifacts/pass2/
           if-no-files-found: warn
       - name: Fail shard if any mutation pass failed
         if: always()
@@ -827,6 +849,18 @@ jobs:
             "${args[@]}" \
             --exclude-re "$BLUELINE_MUTANTS_EXCLUDE" \
             --in-place --baseline=skip --timeout 300
+      - name: Snapshot pass 1 evidence
+        if: always() && steps.mutants_pass1.outcome != 'skipped'
+        run: |
+          mkdir -p artifacts/pass1
+          if [ -d mutants.out ]; then cp -a mutants.out/. artifacts/pass1/ 2>/dev/null || true; fi
+          [ -f mutants.out ] && cp mutants.out artifacts/pass1/mutants.out.txt 2>/dev/null || true
+      - name: Snapshot pass 2 evidence
+        if: always() && steps.mutants_pass2.outcome != 'skipped'
+        run: |
+          mkdir -p artifacts/pass2
+          if [ -d mutants.out ]; then cp -a mutants.out/. artifacts/pass2/ 2>/dev/null || true; fi
+          [ -f mutants.out ] && cp mutants.out artifacts/pass2/mutants.out.txt 2>/dev/null || true
       - name: Collect mutation shard summary
         if: always()
         env:
@@ -836,22 +870,18 @@ jobs:
           DIFF_BASE: ${{ steps.diff.outputs.base }}
         run: |
           mkdir -p artifacts
-          [ -f mutants.out ] && cp mutants.out artifacts/mutants.out || true
-          for f in mutants.out/mutants.json mutants.out/outcomes.json; do
-            [ -f "$f" ] && cp "$f" "artifacts/$(basename "$f")" || true
-          done
           python3 scripts/ci/mutants_shard_summary.py \
             --event push \
             --shard '${{ matrix.shard }}' \
             --shard-total 32 \
             --job-result "${JOB_STATUS:-unknown}" \
             --diff-base "${DIFF_BASE}" \
-            --pass "pass1_glob=${PASS1}" \
-            --pass "pass2_explicit=${PASS2}" \
-            --mutants-out artifacts/mutants.out \
-            --mutants-out mutants.out \
-            --outcomes-json artifacts/outcomes.json \
-            --outcomes-json mutants.out/outcomes.json \
+            --pass "pass1_glob=${PASS1:-unknown}" \
+            --pass "pass2_explicit=${PASS2:-unknown}" \
+            --mutants-out artifacts/pass1/mutants.out.txt \
+            --mutants-out artifacts/pass2/mutants.out.txt \
+            --outcomes-json artifacts/pass1/outcomes.json \
+            --outcomes-json artifacts/pass2/outcomes.json \
             --artifact-name mutants-${{ matrix.shard }} \
             --out artifacts/mutants-shard-summary.json
       - uses: actions/upload-artifact@v4
@@ -860,10 +890,8 @@ jobs:
           name: mutants-${{ matrix.shard }}
           path: |
             artifacts/mutants-shard-summary.json
-            artifacts/mutants.out
-            artifacts/outcomes.json
-            artifacts/mutants.json
-            mutants.out
+            artifacts/pass1/
+            artifacts/pass2/
           if-no-files-found: warn
       - name: Fail shard if any mutation pass failed
         if: always()

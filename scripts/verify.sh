@@ -116,18 +116,16 @@ stage "Clippy" "P0" "gate.rust.lint" "lint" \
     "Fix clippy errors/warnings; do not proceed past static lint failures." \
     cargo clippy --all-targets --locked -- -D warnings
 if command -v cargo-nextest >/dev/null 2>&1; then
+    echo "test runner: cargo-nextest (CI uses nextest --test-threads 8)"
     stage "Tests" "P0" "gate.rust.test" "test" \
         "Fix failing tests before lower-priority gates." \
         cargo nextest run --all-targets --locked --test-threads 8
 else
+    echo "test runner: cargo test (CI uses cargo-nextest --test-threads 8)"
     stage "Tests" "P0" "gate.rust.test" "test" \
         "Fix failing tests before lower-priority gates." \
         cargo test --all-targets --locked
 fi
-
-stage "References" "P2" "gate.docs.references" "references" \
-    "Repair broken references/citations in references/." \
-    scripts/check-references.sh
 
 if [ "$RUN_ALL" -eq 1 ]; then
     stage "Supply-chain audit" "P1" "gate.security.audit" "audit" \
@@ -136,9 +134,13 @@ if [ "$RUN_ALL" -eq 1 ]; then
 fi
 
 if [ "$RUN_MUTANTS" -eq 1 ]; then
-    stage "Mutation testing" "P1" "gate.security.mutation" "mutants-pr/mutants" \
+    stage "Mutation testing" "P1" "gate.security.mutation" "mutants-local (CI: mutants-pr/mutants, 32 shards, --in-diff)" \
         "Inspect cargo-mutants output/survivors; local mutants are not identical to CI's 32-shard in-diff runs." \
         stage_mutants
 fi
+
+stage "References" "P2" "gate.docs.references" "references" \
+    "Repair broken references/citations in references/." \
+    scripts/check-references.sh
 
 printf '\n\033[1;32mPASS\033[0m  %s\n' "$(IFS=, ; echo "${PASSED[*]}")"

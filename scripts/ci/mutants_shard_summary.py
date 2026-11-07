@@ -2,7 +2,6 @@
 """Summarize a cargo-mutants shard run for CI inspectability.
 
 Best-effort: cargo-mutants output formats vary by version; missing files are OK.
-Never fails the build by itself unless --strict is passed.
 """
 from __future__ import annotations
 
@@ -12,6 +11,8 @@ import os
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+OUTCOMES = {"success", "failure", "cancelled", "skipped", "unknown"}
 
 
 def utc_now() -> str:
@@ -42,8 +43,6 @@ def count_outcomes(obj: Any) -> dict[str, int]:
     counts: dict[str, int] = {}
     if obj is None:
         return counts
-    # cargo-mutants outcomes.json may be {"outcomes":[{"outcome":"Caught"|"Missed"|...}]}
-    # or similar structures. Be tolerant.
     items = None
     if isinstance(obj, list):
         items = obj
@@ -72,21 +71,32 @@ def count_outcomes(obj: Any) -> dict[str, int]:
 def classify(job_result: str, passes: list[dict[str, Any]], counts: dict[str, int]) -> str:
     missed = counts.get("missed", 0) + counts.get("survived", 0)
     timeout = counts.get("timeout", 0) + counts.get("time_out", 0)
+    any_pass_failed = any(p.get("outcome") == "failure" for p in passes)
+    any_pass_cancelled = any(p.get("outcome") == "cancelled" for p in passes)
     if missed > 0:
         return "survivor"
     if timeout > 0:
         return "timeout"
-    if job_result == "cancelled":
+    if any_pass_cancelled or job_result == "cancelled":
         return "infra_cancelled"
-    if job_result == "failure":
-        # could be unviable-only, tool error, or unknown
+    if any_pass_failed or job_result == "failure":
+        if sum(counts.values()) == 0:
+            return "survivor_or_unknown"
         if counts.get("unviable", 0) > 0 and missed == 0 and timeout == 0:
             return "unviable_or_tool_failure"
         return "tool_error_or_failure"
     if job_result == "success":
-        if sum(counts.values()) == 0:
-            return "no_mutants_or_unknown"
-        return "clean"
+        return "no_mutants_or_unknown" if sum(counts.values()) == 0 else "clean"
+    return "unknown"
+
+
+def normalized_result(root: str, job_result: str, passes: list[dict[str, Any]]) -> str:
+    if root in {"survivor", "timeout", "infra_cancelled", "survivor_or_unknown", "tool_error_or_failure", "unviable_or_tool_failure"}:
+        return "failure"
+    if any(p.get("outcome") in {"failure", "cancelled"} for p in passes):
+        return "failure"
+    if job_result in OUTCOMES:
+        return job_result
     return "unknown"
 
 
@@ -99,39 +109,42 @@ def main() -> int:
     p.add_argument("--diff-base", default="")
     p.add_argument("--mutants-out", action="append", default=[])
     p.add_argument("--outcomes-json", action="append", default=[])
-    p.add_argument("--pass", action="append", default=[], help="name=exit_code form")
+    p.add_argument("--pass", dest="passes", action="append", default=[], help="name=outcome (success|failure|cancelled|skipped)")
     p.add_argument("--out", required=True)
     p.add_argument("--artifact-name", default="")
     p.add_argument("--strict", action="store_true")
     args = p.parse_args()
 
-    passes = []
-    for spec in args.passes if False else args.__dict__["pass"]:
+    passes: list[dict[str, Any]] = []
+    for spec in args.passes:
         if "=" in spec:
-            name, code = spec.rsplit("=", 1)
-            try:
-                exit_code = int(code)
-            except ValueError:
-                exit_code = None
+            name, outcome = spec.rsplit("=", 1)
+            outcome = outcome.strip().lower() or "unknown"
         else:
-            name, exit_code = spec, None
-        passes.append({"name": name, "exit_code": exit_code})
+            name, outcome = spec, "unknown"
+        passes.append({"name": name.strip(), "outcome": outcome})
 
     merged_counts: dict[str, int] = {}
-    outcomes_sources = []
+    outcomes_sources: list[str] = []
+    seen_sources: set[str] = set()
     for rel in args.outcomes_json:
         path = Path(rel)
         if not path.exists():
             continue
+        key = str(path.resolve()) if path.exists() else str(path)
+        if key in seen_sources:
+            continue
+        seen_sources.add(key)
         outcomes_sources.append(str(path))
         obj = load_json(path)
         for k, v in count_outcomes(obj).items():
             merged_counts[k] = merged_counts.get(k, 0) + v
 
-    mutants_out = [str(p) for p in args.mutants_out if Path(p).exists()]
+    mutants_out = [str(x) for x in args.mutants_out if Path(x).exists()]
     root = classify(args.job_result, passes, merged_counts)
+    result = normalized_result(root, args.job_result, passes)
     data = {
-        "schema_version": 1,
+        "schema_version": 2,
         "kind": "mutants_shard",
         "category": "gate.security.mutation",
         "priority": "P1",
@@ -139,6 +152,7 @@ def main() -> int:
         "shard": args.shard,
         "shard_total": args.shard_total,
         "job_result": args.job_result,
+        "result": result,
         "root_cause_class": root,
         "diff_base": args.diff_base,
         "passes": passes,
@@ -157,26 +171,29 @@ def main() -> int:
     rows = [
         f"## P1 gate.security.mutation — shard {args.shard}/{args.shard_total} ({args.event})",
         "",
+        f"**Result:** {result}",
         f"**Job result:** {args.job_result}",
         f"**Root cause class:** `{root}`",
-        f"**Diff base:** `{args.diff_base}`" if args.diff_base else None,
     ]
-    rows = [r for r in rows if r is not None]
+    if args.diff_base:
+        rows.append(f"**Diff base:** `{args.diff_base}`")
     if passes:
-        rows.append("**Passes:** " + ", ".join(f"`{p['name']}`={p.get('exit_code')}" for p in passes))
+        rows.append("**Passes:** " + ", ".join(f"`{p['name']}`={p.get('outcome')}" for p in passes))
     if merged_counts:
         rows.append("**Outcome counts:** " + ", ".join(f"{k}={v}" for k, v in sorted(merged_counts.items())))
     else:
-        rows.append("**Outcome counts:** unavailable (no parseable outcomes.json); inspect `mutants.out` artifact.")
-    if args.job_result == "cancelled" or root in ("infra_cancelled", "timeout"):
+        rows.append("**Outcome counts:** unavailable (no parseable outcomes.json); use pass outcomes and `mutants.out`.")
+    if result != "success" or root in ("infra_cancelled", "timeout", "survivor_or_unknown"):
         rows.append("")
         rows.append(
-            "Cancelled/timeouts are **unknown fate**, not survivors. Check job timeout (100m), per-mutant timeout (300s), and shard logs."
+            "If cancelled/timeout/unknown: treat as **unknown fate** (not a proven survivor). Check job timeout (100m), per-mutant timeout (300s), and shard logs/artifacts."
         )
     rows.append("")
     append_summary("\n".join(rows))
 
-    return 0 if not args.strict else (0 if args.job_result == "success" and root in ("clean", "no_mutants_or_unknown") else 1)
+    if args.strict:
+        return 0 if result == "success" and root in ("clean", "no_mutants_or_unknown") else 1
+    return 0
 
 
 if __name__ == "__main__":

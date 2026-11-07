@@ -14,6 +14,7 @@ from typing import Any
 
 PRIORITY_ORDER = {"P0": 0, "P1": 1, "P2": 2, "P3": 3, "P4": 4, "P9": 9}
 RESULT_BAD = {"failure", "cancelled", "timed_out", "timeout", "error"}
+SHARD_BAD_ROOTS = {"survivor", "timeout", "infra_cancelled", "survivor_or_unknown", "tool_error_or_failure", "unviable_or_tool_failure"}
 
 
 def utc_now() -> str:
@@ -33,19 +34,21 @@ def append_summary(md: str) -> None:
         pass
 
 
-def load_jsons(root: Path) -> list[dict[str, Any]]:
+def load_jsons(root: Path) -> tuple[list[dict[str, Any]], int]:
     out = []
+    skipped = 0
     if not root.exists():
-        return out
+        return out, skipped
     for path in sorted(root.rglob("*.json")):
         try:
             obj = json.loads(path.read_text(encoding="utf-8"))
         except Exception:
+            skipped += 1
             continue
         if isinstance(obj, dict):
             obj.setdefault("_source", str(path))
             out.append(obj)
-    return out
+    return out, skipped
 
 
 def gate_sort_key(g: dict[str, Any]) -> tuple[int, str, str]:
@@ -70,19 +73,23 @@ def normalize_gate(obj: dict[str, Any]) -> dict[str, Any] | None:
             "details": {k: v for k, v in obj.items() if k not in {"_source"}},
         }
     if kind == "mutants_shard":
-        result = obj.get("job_result", "unknown")
         root = obj.get("root_cause_class", "unknown")
-        reason = f"shard {obj.get('shard')}/{obj.get('shard_total')}: {root}"
+        raw_result = str(obj.get("result") or obj.get("job_result") or "unknown")
+        result = "failure" if root in SHARD_BAD_ROOTS or raw_result.lower() in RESULT_BAD else raw_result
         counts = obj.get("outcome_counts") or {}
+        reason = f"shard {obj.get('shard')}/{obj.get('shard_total')}: {root}"
         if counts:
             reason += "; " + ", ".join(f"{k}={v}" for k, v in sorted(counts.items()))
         fix = ""
-        if root == "survivor":
-            fix = "Add/strengthen tests or fix logic for survived mutants; inspect mutants.out for this shard."
+        if root in {"survivor", "survivor_or_unknown"}:
+            fix = "Add/strengthen tests or fix logic for survived/unknown mutants; inspect shard artifact."
         elif root in ("timeout", "infra_cancelled"):
-            fix = "Unknown fate (not a proven survivor). Check shard timeout/cancellation and rerun; inspect shard logs/artifact."
-        elif str(result).lower() in RESULT_BAD:
+            fix = "Unknown fate (not a proven survivor). Check timeout/cancellation/rerun; inspect shard logs/artifact."
+        elif result.lower() in RESULT_BAD:
             fix = "Inspect shard artifact/logs; distinguish tool/infra failure from mutation result."
+        passes = obj.get("passes") or []
+        if passes:
+            reason += "; passes=" + ",".join(f"{p.get('name')}:{p.get('outcome', p.get('exit_code'))}" for p in passes)
         return {
             "priority": "P1",
             "category": "gate.security.mutation",
@@ -104,7 +111,7 @@ def main() -> int:
     p.add_argument("--event", default=os.environ.get("GITHUB_EVENT_NAME", ""))
     args = p.parse_args()
 
-    objs = load_jsons(Path(args.input_dir))
+    objs, skipped = load_jsons(Path(args.input_dir))
     gates = []
     for obj in objs:
         g = normalize_gate(obj)
@@ -114,23 +121,29 @@ def main() -> int:
 
     failures = [g for g in gates if str(g.get("result", "")).lower() in RESULT_BAD]
     fix_first = []
-    seen = set()
+    by_key: dict[tuple[str, str, str], list[dict[str, Any]]] = {}
     for g in failures:
-        cat = g["category"]
-        if cat not in seen:
-            seen.add(cat)
-            fix_first.append(
-                {
-                    "priority": g["priority"],
-                    "category": cat,
-                    "reason": g.get("reason") or g.get("result"),
-                    "evidence": g.get("evidence", ""),
-                    "hint": g.get("fix_first", ""),
-                }
-            )
+        key = (str(g.get("priority", "P9")), str(g.get("category", "")), str(g.get("job", "")))
+        by_key.setdefault(key, []).append(g)
+    for (priority, category, job), items in sorted(by_key.items(), key=lambda kv: (PRIORITY_ORDER.get(kv[0][0], 9), kv[0][1], kv[0][2])):
+        first = items[0]
+        reason = first.get("reason") or first.get("result")
+        if len(items) > 1:
+            reason = f"{len(items)} failures — {reason}"
+        fix_first.append(
+            {
+                "priority": priority,
+                "category": category,
+                "job": job,
+                "count": len(items),
+                "reason": reason,
+                "evidence": first.get("evidence", ""),
+                "hint": first.get("fix_first", ""),
+            }
+        )
 
     report = {
-        "schema_version": 1,
+        "schema_version": 2,
         "kind": "ci_triage",
         "event": args.event,
         "sha": os.environ.get("GITHUB_SHA", ""),
@@ -140,20 +153,29 @@ def main() -> int:
         "overall_result": "failure" if failures else "success",
         "gate_count": len(gates),
         "failure_count": len(failures),
+        "sources_loaded": len(objs),
+        "sources_skipped": skipped,
         "fix_first": fix_first,
         "gates": gates,
-        "sources_loaded": len(objs),
     }
 
     Path(args.out_json).parent.mkdir(parents=True, exist_ok=True)
     Path(args.out_json).write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
-    lines = ["# CI triage summary", "", f"- Event: `{args.event}`", f"- Overall: **{report['overall_result']}**", f"- Gates loaded: {len(gates)} (from {len(objs)} JSON files)", f"- Failures/cancellations: {len(failures)}", ""]
+    lines = [
+        "# CI triage summary",
+        "",
+        f"- Event: `{args.event}`",
+        f"- Overall: **{report['overall_result']}**",
+        f"- Gates loaded: {len(gates)} (from {len(objs)} JSON files, {skipped} skipped/unparseable)",
+        f"- Failures/cancellations: {len(failures)}",
+        "",
+    ]
     if fix_first:
         lines += ["## Fix first", ""]
         for item in fix_first:
             hint = f" — {item['hint']}" if item.get("hint") else ""
-            lines.append(f"- **{item['priority']} {item['category']}**: {item['reason']}{hint}")
+            lines.append(f"- **{item['priority']} {item['category']} / {item['job']}** (x{item['count']}): {item['reason']}{hint}")
         lines.append("")
     lines += ["## Gates (priority order)", "", "| Priority | Category | Job | Result | Reason | Evidence |", "|---|---|---|---|---|---|"]
     for g in gates:
@@ -162,6 +184,8 @@ def main() -> int:
         lines.append(f"| {g['priority']} | {g['category']} | {g['job']} | {g['result']} | {reason} | {ev} |")
     if not gates:
         lines += ["", "_No gate summary JSON files were found. Check artifact download patterns and per-job summary steps._"]
+    if skipped:
+        lines += ["", f"_Warning: {skipped} JSON file(s) were skipped/unparseable._"]
     lines.append("")
     md = "\n".join(lines)
     Path(args.out_md).write_text(md, encoding="utf-8")
