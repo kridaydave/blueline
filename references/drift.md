@@ -47,6 +47,7 @@ the prose docs.
 | [pkgbuild](features/pkgbuild.md) | `src/pkgbuild.rs` production + all 69 test names + the corpus gate |
 | [extract](features/extract.md) | `src/extract.rs` production + all 42 test names |
 | [sandbox](features/sandbox.md) | `src/sandbox.rs` production + all test names |
+| [wheel_extract](features/wheel_extract.md) | `src/wheel_extract.rs` (one line) |
 | [store](features/store.md) | `src/store.rs` production + schema + 12 test names |
 | [policy](features/policy.md) | `src/policy.rs` production + 15 test names |
 | [baseline](features/baseline.md) | `src/baseline.rs` production + 12 test names |

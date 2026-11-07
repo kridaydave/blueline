@@ -278,6 +278,7 @@ fn shim_install_refuses_unknown_manager_and_missing_real_binary() {
     assert!(!shim_dir.join("npm").exists());
 }
 
+#[cfg(unix)]
 fn stderr(out: &std::process::Output) -> String {
     String::from_utf8_lossy(&out.stderr).into_owned()
 }
