@@ -14,6 +14,8 @@
 
 mod support;
 
+use support::stderr_of;
+
 use support::{
     AurRegistry, AurRevision, Band, Cli, EXIT_BLOCKED, EXIT_ERROR, Entry, Probe, RecallService,
     Registry, ReleaseBuilder, gzip, pad_to_512, pax_record, raw_header, sha512_sri,
@@ -729,7 +731,7 @@ fn shim_fails_closed_when_the_baked_blueline_binary_is_missing() {
     assert!(
         install.status.success(),
         "shim install failed: {}",
-        stderr(&install)
+        stderr_of(&install)
     );
 
     let shim = shim_dir.join("npm");
@@ -841,7 +843,3 @@ const ROUTABLE_LITERALS: &[&str] = &[
     "osv.dev",
     "https://",
 ];
-
-fn stderr(out: &std::process::Output) -> String {
-    String::from_utf8_lossy(&out.stderr).into_owned()
-}

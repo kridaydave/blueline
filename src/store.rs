@@ -1720,8 +1720,6 @@ mod tests {
         use proptest::prelude::*;
         use std::collections::BTreeMap;
 
-        use crate::test_support::checksum as ck;
-
         // K distinct (name, version) keys plus a sequence of actions that
         // reference them. Each action re-verifies a key with either its true
         // integrity (must succeed, idempotent) or a different one (must fail

@@ -32,7 +32,9 @@
 #![allow(dead_code)]
 
 mod aur;
+pub mod aur_fixture;
 mod cli;
+pub mod mock_registry;
 mod registry;
 mod tarball;
 
@@ -111,4 +113,9 @@ impl Probe {
             self.path().display()
         );
     }
+}
+
+/// Decode stderr from a command output for test assertions.
+pub fn stderr_of(out: &std::process::Output) -> String {
+    String::from_utf8_lossy(&out.stderr).into_owned()
 }

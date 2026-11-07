@@ -903,10 +903,8 @@ impl Registry for AurRegistry {
 
 #[cfg(test)]
 mod tests {
-    fn stderr(out: &std::process::Output) -> String {
-        String::from_utf8_lossy(&out.stderr).into_owned()
-    }
     use super::*;
+    use crate::test_support::stderr_of;
     use std::io::Write;
     use std::net::TcpListener;
     use std::sync::Arc;
@@ -1262,7 +1260,7 @@ mod tests {
         assert!(
             out.status.success(),
             "git {args:?} failed: {}",
-            stderr(&out)
+            stderr_of(&out)
         );
     }
 
@@ -1639,7 +1637,7 @@ mod tests {
         assert!(
             out.status.success(),
             "oversize commit failed: {}",
-            stderr(&out)
+            stderr_of(&out)
         );
         let reg = fx.registry();
 

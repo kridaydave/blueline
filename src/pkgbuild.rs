@@ -1726,15 +1726,15 @@ fn check_r12_pair(baseline: &FoldedPkgbuild, target: &FoldedPkgbuild) -> Vec<Pkg
     if changed.is_empty() {
         return findings;
     }
-    findings.push(PkgFinding {
-        rule_id: "R12_SOURCE_URL_DRIFT".to_string(),
-        severity: VerdictBand::Medium,
-        evidence: format!(
+    findings.push(finding(
+        "R12_SOURCE_URL_DRIFT",
+        VerdictBand::Medium,
+        format!(
             "source URL changed while pkgver stayed `{}`: {}",
             target_ver.or(base_ver).unwrap_or("?"),
             changed.join(", ")
         ),
-    });
+    ));
     findings
 }
 
@@ -2101,11 +2101,7 @@ fn check_r23(folded: &FoldedPkgbuild) -> Vec<PkgFinding> {
             format!("{}(): {} (spec: {})", hit.function, hit.line, hit.spec)
         };
         if seen.insert(evidence.clone()) {
-            findings.push(PkgFinding {
-                rule_id: "R23_NPM_DELIVERY".to_string(),
-                severity: VerdictBand::Medium,
-                evidence,
-            });
+            findings.push(finding("R23_NPM_DELIVERY", VerdictBand::Medium, evidence));
         }
     }
     findings
@@ -2156,14 +2152,14 @@ fn check_r16(folded: &FoldedPkgbuild) -> Vec<PkgFinding> {
     if folded.meta_subst_arrays.is_empty() {
         return Vec::new();
     }
-    vec![PkgFinding {
-        rule_id: "R16_CMD_SUBST_IN_META".to_string(),
-        severity: VerdictBand::Medium,
-        evidence: format!(
+    vec![finding(
+        "R16_CMD_SUBST_IN_META",
+        VerdictBand::Medium,
+        format!(
             "command substitution in metadata array: {}",
             folded.meta_subst_arrays.join(", ")
         ),
-    }]
+    )]
 }
 
 fn check_r17(folded: &FoldedPkgbuild) -> Vec<PkgFinding> {
@@ -2258,15 +2254,15 @@ fn check_r29_depends_vs_srcinfo(
     if missing.is_empty() {
         return Vec::new();
     }
-    vec![PkgFinding {
-        rule_id: "R29_PKGBUILD_DEPENDS_NOT_IN_SRCINFO".to_string(),
-        severity: VerdictBand::High,
-        evidence: format!(
+    vec![finding(
+        "R29_PKGBUILD_DEPENDS_NOT_IN_SRCINFO",
+        VerdictBand::High,
+        format!(
             "the PKGBUILD declares dependencies the committed .SRCINFO does not list, so the \
              reviewed dependency set is not the installed one: {}",
             missing.join(", ")
         ),
-    }]
+    )]
 }
 
 fn check_r19_pair(baseline: &FoldedPkgbuild, target: &FoldedPkgbuild) -> Vec<PkgFinding> {
@@ -2292,15 +2288,15 @@ fn check_r19_pair(baseline: &FoldedPkgbuild, target: &FoldedPkgbuild) -> Vec<Pkg
             "validpgpkeys unresolvable; cannot compare across releases".to_string(),
         )];
     }
-    vec![PkgFinding {
-        rule_id: "R19_VALIDPGPKEYS_CHANGE".to_string(),
-        severity: VerdictBand::Medium,
-        evidence: format!(
+    vec![finding(
+        "R19_VALIDPGPKEYS_CHANGE",
+        VerdictBand::Medium,
+        format!(
             "validpgpkeys changed: [{}] -> [{}]",
             base_keys.join(", "),
             target_keys.join(", ")
         ),
-    }]
+    )]
 }
 
 fn check_r21(folded: &FoldedPkgbuild) -> Vec<PkgFinding> {

@@ -10,9 +10,9 @@ use std::sync::Arc;
 
 use assert_cmd::Command;
 
-mod aur_fixture;
+mod support;
 
-use aur_fixture::{fixture_git, read_http_request, upload_pack};
+use support::aur_fixture::{fixture_git, read_http_request, upload_pack};
 
 const SLOW: &str = "aaa-slow";
 const FAST: [&str; 3] = ["bbb-fast", "ccc-fast", "ddd-fast"];

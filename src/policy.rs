@@ -635,10 +635,8 @@ fn glob_match(pattern: &str, text: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    fn stderr(out: &std::process::Output) -> String {
-        String::from_utf8_lossy(&out.stderr).into_owned()
-    }
     use super::*;
+    use crate::test_support::stderr_of;
 
     #[test]
     fn default_policy_has_sane_values() {
@@ -1147,13 +1145,13 @@ ecosystem = "rubygems"
         assert!(
             out.status.success(),
             "set BLUELINE_POLICY must read present: {}",
-            stderr(&out)
+            stderr_of(&out)
         );
         let out = run_probe("policy::tests::probe_env_policy_present_when_unset", false);
         assert!(
             out.status.success(),
             "unset BLUELINE_POLICY must read absent: {}",
-            stderr(&out)
+            stderr_of(&out)
         );
     }
 

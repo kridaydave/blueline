@@ -5,6 +5,8 @@
 
 #[cfg(unix)]
 use std::collections::HashMap;
+
+mod support;
 #[cfg(unix)]
 use std::path::Path;
 
@@ -12,10 +14,9 @@ use std::path::Path;
 use assert_cmd::Command;
 
 #[cfg(unix)]
-mod mock_registry;
-
+use support::mock_registry::{Fixture, packument, sha512_b64, spawn_fixture, tarball_with};
 #[cfg(unix)]
-use mock_registry::{Fixture, packument, sha512_b64, spawn_fixture, tarball_with};
+use support::stderr_of;
 
 #[cfg(unix)]
 fn spawn_two_packages() -> Fixture {
@@ -107,7 +108,7 @@ fn shim_installs_gates_and_uninstalls() {
         )
         .output()
         .unwrap();
-    assert!(out.status.success(), "install failed: {}", stderr(&out));
+    assert!(out.status.success(), "install failed: {}", stderr_of(&out));
     let shim = shim_dir.join("npm");
     assert!(shim.is_file(), "shim script must exist");
 
@@ -214,7 +215,7 @@ fn shim_installs_all_eleven_managers() {
     assert!(
         out.status.success(),
         "installing all managers failed: {}",
-        stderr(&out)
+        stderr_of(&out)
     );
     for manager in managers {
         assert!(
@@ -276,9 +277,4 @@ fn shim_install_refuses_unknown_manager_and_missing_real_binary() {
         String::from_utf8_lossy(&out.stderr)
     );
     assert!(!shim_dir.join("npm").exists());
-}
-
-#[cfg(unix)]
-fn stderr(out: &std::process::Output) -> String {
-    String::from_utf8_lossy(&out.stderr).into_owned()
 }

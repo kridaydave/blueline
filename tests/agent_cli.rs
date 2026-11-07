@@ -6,9 +6,9 @@ use std::collections::HashMap;
 
 use assert_cmd::Command;
 
-mod mock_registry;
+mod support;
 
-use mock_registry::{Fixture, packument, sha512_b64, spawn_fixture, tarball_with};
+use support::mock_registry::{Fixture, packument, sha512_b64, spawn_fixture, tarball_with};
 
 fn spawn_two_packages() -> (Fixture, std::path::PathBuf, std::path::PathBuf) {
     // `ok` is script-free; `risky` adds a postinstall (R01 BLOCK).

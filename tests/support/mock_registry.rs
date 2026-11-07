@@ -15,7 +15,7 @@ use sha2::{Digest, Sha512};
 
 pub struct Fixture {
     pub base: String,
-    pub _server: std::thread::JoinHandle<()>,
+    pub server: std::thread::JoinHandle<()>,
 }
 
 /// Mini HTTP/1.1 registry serving two packages: packuments at `/{name}`
@@ -38,7 +38,7 @@ where
     });
     Fixture {
         base,
-        _server: handle,
+        server: handle,
     }
 }
 

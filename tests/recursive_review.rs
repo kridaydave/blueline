@@ -4,92 +4,12 @@
 //! fixture registry. Nothing is ever executed.
 
 use std::collections::HashMap;
-use std::io::{Read, Write};
-use std::net::{TcpListener, TcpStream};
-use std::sync::Arc;
 
 use assert_cmd::Command;
 
-mod mock_registry;
+mod support;
 
-use mock_registry::{Fixture, packument, sha512_b64, tarball_with};
-
-/// Mini HTTP/1.1 registry serving two packages: packuments at `/{name}`
-/// and tarballs at `/{name}/-/{name}-{version}.tgz`.
-fn spawn_fixture<F>(build: F) -> Fixture
-where
-    F: FnOnce(&str) -> HashMap<String, (String, Vec<u8>)> + Send + 'static,
-{
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let base = format!("http://{}", listener.local_addr().unwrap());
-    let packages = Arc::new(build(&base));
-    let handle = std::thread::spawn(move || {
-        for stream in listener.incoming() {
-            let Ok(mut stream) = stream else { continue };
-            let packages = packages.clone();
-            std::thread::spawn(move || serve(&mut stream, &packages));
-        }
-    });
-    Fixture {
-        base,
-        _server: handle,
-    }
-}
-
-fn serve(stream: &mut TcpStream, packages: &Arc<HashMap<String, (String, Vec<u8>)>>) {
-    let mut buf = Vec::new();
-    let mut tmp = [0u8; 2048];
-    loop {
-        match stream.read(&mut tmp) {
-            Ok(0) | Err(_) => return,
-            Ok(n) => {
-                buf.extend_from_slice(&tmp[..n]);
-                if buf.windows(4).any(|w| w == b"\r\n\r\n") {
-                    break;
-                }
-                if buf.len() > 65_536 {
-                    return;
-                }
-            }
-        }
-    }
-    let req = String::from_utf8_lossy(&buf);
-    let path = req
-        .lines()
-        .next()
-        .and_then(|l| l.split_whitespace().nth(1))
-        .unwrap_or("/")
-        .to_string();
-    let name = path.trim_start_matches('/');
-    let body: Vec<u8> = if let Some((pack, _)) = packages.get(name) {
-        pack.as_bytes().to_vec()
-    } else if let Some(tgz) = path.strip_prefix('/') {
-        // tarball path {name}/-/{name}-{version}.tgz
-        let segments: Vec<&str> = tgz.split('/').collect();
-        if segments.len() == 3 {
-            let tgz_name = segments[2].strip_suffix(".tgz").unwrap_or(segments[2]);
-            if let Some((name, _version)) = tgz_name.rsplit_once('-') {
-                if let Some((_, tar)) = packages.get(name) {
-                    tar.clone()
-                } else {
-                    return;
-                }
-            } else {
-                return;
-            }
-        } else {
-            return;
-        }
-    } else {
-        return;
-    };
-    let head = format!(
-        "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-        body.len()
-    );
-    let _ = stream.write_all(head.as_bytes());
-    let _ = stream.write_all(&body);
-}
+use support::mock_registry::{packument, sha512_b64, spawn_fixture, tarball_with};
 
 fn review_json(base: &str, spec: &str) -> (i32, String) {
     review_json_with_policy(base, spec, None)

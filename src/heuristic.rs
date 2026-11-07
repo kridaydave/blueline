@@ -2142,13 +2142,10 @@ fn provenance_findings(
 mod tests {
     use super::*;
     use crate::diff::FileChange;
-
-    fn has_finding(verdict: &Verdict, rule_id: &str) -> bool {
-        verdict.findings.iter().any(|f| f.rule_id == rule_id)
-    }
+    use crate::test_support::has_finding;
 
     /// A clean npm release through the policy path, everything default.
-    fn npm_verdict(delta: &Delta) -> Verdict {
+    fn npm_policy_verdict(delta: &Delta) -> Verdict {
         evaluate_with_policy(
             "test-pkg",
             Ecosystem::Npm,
@@ -2161,7 +2158,7 @@ mod tests {
 
     /// A clean npm release through the trust path, with everything not
     /// under test at its default.
-    fn npm_clean_verdict(
+    fn npm_trust_verdict(
         delta: &Delta,
         release_author: Option<&str>,
         advisories: Option<&AdvisoryReport>,
@@ -2185,7 +2182,7 @@ mod tests {
         )
     }
 
-    /// Empty delta; tests override the fields they care about.
+    /// Minimal delta with a version bump; tests override the fields they care about.
     fn base_delta() -> Delta {
         Delta {
             baseline_version: Some("1.0.0".into()),
@@ -2215,7 +2212,7 @@ mod tests {
             ..base_delta()
         };
 
-        let verdict = npm_verdict(&delta);
+        let verdict = npm_policy_verdict(&delta);
         assert_eq!(verdict.band, VerdictBand::Block);
         assert!(verdict.risk_score >= 50);
         assert!(has_finding(&verdict, "R01_LIFECYCLE_SCRIPT_ADDED"));
@@ -2239,7 +2236,7 @@ mod tests {
             ..base_delta()
         };
 
-        let verdict = npm_verdict(&delta);
+        let verdict = npm_policy_verdict(&delta);
         assert_eq!(verdict.band, VerdictBand::High);
         assert!(has_finding(&verdict, "R03_EVAL_USAGE"));
         assert!(has_finding(&verdict, "R02_EXECUTABLE_ADDED"));
@@ -2260,7 +2257,7 @@ mod tests {
             ..base_delta()
         };
 
-        let verdict = npm_verdict(&delta);
+        let verdict = npm_policy_verdict(&delta);
         assert_eq!(verdict.band, VerdictBand::High);
         assert!(has_finding(&verdict, "R02_OPAQUE_LARGE_FILE_ADDED"));
     }
@@ -3011,7 +3008,7 @@ mod tests {
             ..base_delta()
         };
 
-        let verdict = npm_verdict(&delta);
+        let verdict = npm_policy_verdict(&delta);
         assert_eq!(verdict.band, VerdictBand::Block);
         assert!(has_finding(&verdict, "R01_BINDING_GYP_ADDED"));
     }
@@ -3046,7 +3043,7 @@ mod tests {
             ..base_delta()
         };
 
-        let verdict = npm_verdict(&delta);
+        let verdict = npm_policy_verdict(&delta);
         assert_eq!(verdict.band, VerdictBand::High);
         assert!(
             verdict
@@ -3073,7 +3070,7 @@ mod tests {
             ..base_delta()
         };
 
-        let verdict = npm_verdict(&delta);
+        let verdict = npm_policy_verdict(&delta);
         assert_eq!(verdict.band, VerdictBand::Medium);
         assert_eq!(verdict.risk_score, 15);
         assert!(
@@ -3258,7 +3255,7 @@ mod tests {
             ..base_delta()
         };
 
-        let verdict = npm_verdict(&delta);
+        let verdict = npm_policy_verdict(&delta);
         assert_eq!(verdict.band, VerdictBand::High);
         assert!(has_finding(&verdict, "R02_BINARY_BLOB_MODIFIED"));
     }
@@ -3274,7 +3271,7 @@ mod tests {
             ..base_delta()
         };
 
-        let verdict = npm_verdict(&delta);
+        let verdict = npm_policy_verdict(&delta);
         assert_eq!(verdict.band, VerdictBand::High);
         assert!(has_finding(&verdict, "R04_DEPENDENCY_MODIFIED"));
     }
@@ -3337,7 +3334,7 @@ mod tests {
             ..base_delta()
         };
 
-        let verdict = npm_verdict(&delta);
+        let verdict = npm_policy_verdict(&delta);
         assert_eq!(verdict.risk_score, 100);
         assert_eq!(verdict.band, VerdictBand::Block);
     }
@@ -3431,7 +3428,7 @@ mod tests {
             message: None,
         };
 
-        let verdict = npm_clean_verdict(&delta, None, Some(&adv), None);
+        let verdict = npm_trust_verdict(&delta, None, Some(&adv), None);
 
         assert_eq!(verdict.band, VerdictBand::Block);
         assert!(has_finding(&verdict, "R09_ADVISORY_MALWARE"));
@@ -3456,7 +3453,7 @@ mod tests {
             message: None,
         };
 
-        let verdict = npm_clean_verdict(&delta, None, Some(&adv), None);
+        let verdict = npm_trust_verdict(&delta, None, Some(&adv), None);
 
         assert_eq!(verdict.band, VerdictBand::Block);
         assert!(has_finding(&verdict, "R09_ADVISORY_CRITICAL_CVE"));
@@ -3468,7 +3465,7 @@ mod tests {
 
         let prov = ProvenanceReport::failed_mismatch("digest hash mismatch");
 
-        let verdict = npm_clean_verdict(&delta, None, None, Some(&prov));
+        let verdict = npm_trust_verdict(&delta, None, None, Some(&prov));
 
         assert_eq!(verdict.band, VerdictBand::Block);
         assert!(has_finding(&verdict, "P03_PROVENANCE_DIGEST_MISMATCH"));
@@ -4368,7 +4365,7 @@ maintainers = ["badactor@example.com"]
     #[test]
     fn an_empty_maintainer_blocklist_discloses_nothing() {
         let delta = Delta { ..base_delta() };
-        let verdict = npm_clean_verdict(&delta, None, None, None);
+        let verdict = npm_trust_verdict(&delta, None, None, None);
         assert!(
             !verdict
                 .findings

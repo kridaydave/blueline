@@ -12,9 +12,9 @@ use std::sync::Arc;
 use assert_cmd::Command;
 use predicates::prelude::*;
 
-mod aur_fixture;
+mod support;
 
-use aur_fixture::{fixture_git, read_http_request, upload_pack};
+use support::aur_fixture::{fixture_git, read_http_request, upload_pack};
 
 #[test]
 fn install_refuses_aur_before_any_network_use() {

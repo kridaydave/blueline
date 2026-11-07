@@ -3,9 +3,10 @@ use std::net::{TcpListener, TcpStream};
 use std::sync::Arc;
 
 use assert_cmd::Command;
-use base64::Engine;
 use predicates::prelude::*;
-use sha2::{Digest, Sha512};
+
+mod support;
+use support::mock_registry;
 
 struct Fixture {
     base: String,
@@ -116,30 +117,11 @@ fn make_tarball_named(name: &str, version: &str, code: &[u8]) -> Vec<u8> {
 }
 
 fn sha512_b64(data: &[u8]) -> String {
-    let digest = Sha512::digest(data);
-    format!(
-        "sha512-{}",
-        base64::engine::general_purpose::STANDARD.encode(digest)
-    )
+    mock_registry::sha512_b64(data)
 }
 
 fn packument(base: &str, version: &str, integrity: &str) -> String {
-    serde_json::json!({
-        "name": "express",
-        "dist-tags": { "latest": version },
-        "versions": {
-            version: {
-                "name": "express",
-                "version": version,
-                "dist": {
-                    "tarball": format!("{base}/express/-/express-{version}.tgz"),
-                    "integrity": integrity,
-                    "shasum": "0".repeat(40)
-                }
-            }
-        }
-    })
-    .to_string()
+    mock_registry::packument("express", base, version, integrity)
 }
 
 /// A policy file that switches advisory lookups off, pointed at by

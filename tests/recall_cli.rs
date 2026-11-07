@@ -9,9 +9,11 @@ use std::process::{Child, Stdio};
 
 use assert_cmd::Command;
 
-mod mock_registry;
+mod support;
 
-use mock_registry::{packument, sha512_b64, spawn_fixture, tarball_with};
+use support::stderr_of;
+
+use support::mock_registry::{packument, sha512_b64, spawn_fixture, tarball_with};
 
 struct RecallServer {
     url: String,
@@ -124,7 +126,7 @@ fn recall_index_hit_blocks_a_clean_looking_release() {
         .args(["recall", "sync", "--url", &server.url])
         .output()
         .unwrap();
-    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(out.status.success(), "{}", stderr_of(&out));
 
     // The package itself is perfectly clean — the index is what blocks it.
     let json = r#"{"name":"evil-pkg","version":"1.0.0"}"#;
@@ -238,7 +240,7 @@ fn backward_sequence_is_refused_without_write_and_equal_sequence_is_idempotent()
     assert!(
         out.status.success(),
         "equal sequence must re-sync cleanly: {}",
-        stderr(&out)
+        stderr_of(&out)
     );
     let stored: serde_json::Value =
         serde_json::from_slice(&std::fs::read(&snapshot_path).unwrap()).unwrap();
@@ -416,7 +418,7 @@ fn audit_export_candidates_lists_denials_for_curation() {
         ])
         .output()
         .unwrap();
-    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(out.status.success(), "{}", stderr_of(&out));
     let candidates: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(&out_path).unwrap()).unwrap();
     let entries = candidates.as_array().unwrap();
@@ -441,7 +443,7 @@ fn recall_export_osv_writes_osv_documents_from_curated_snapshot() {
 
     let out_path = data_dir.path().join("osv.json");
     let out = export_osv(data_dir.path(), &snap_path, &out_path);
-    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(out.status.success(), "{}", stderr_of(&out));
     // Nothing was skipped, so nothing may be reported as skipped. The counter
     // gate is `> 0`, not `>= 0`.
     assert!(
@@ -519,7 +521,7 @@ fn recall_export_osv_all_versions_emits_semver_range() {
     std::fs::write(&snap_path, snap.to_string()).unwrap();
     let out_path = data_dir.path().join("out.json");
     let out = export_osv(data_dir.path(), &snap_path, &out_path);
-    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(out.status.success(), "{}", stderr_of(&out));
     let docs: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(&out_path).unwrap()).unwrap();
     let d = &docs.as_array().unwrap()[0];
@@ -558,7 +560,7 @@ fn recall_export_osv_handles_pypi_ecosystem() {
     std::fs::write(&snap_path, snap.to_string()).unwrap();
     let out_path = data_dir.path().join("out.json");
     let out = export_osv(data_dir.path(), &snap_path, &out_path);
-    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(out.status.success(), "{}", stderr_of(&out));
     let docs: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(&out_path).unwrap()).unwrap();
     assert_eq!(docs[0]["affected"][0]["package"]["ecosystem"], "PyPI");
@@ -581,7 +583,7 @@ fn recall_export_osv_prefixes_and_preserves_ids() {
     std::fs::write(&snap_path, snap.to_string()).unwrap();
     let out_path = data_dir.path().join("out.json");
     let out = export_osv(data_dir.path(), &snap_path, &out_path);
-    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(out.status.success(), "{}", stderr_of(&out));
     let docs: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(&out_path).unwrap()).unwrap();
     let docs = docs.as_array().unwrap();
@@ -645,7 +647,7 @@ fn recall_export_osv_accepts_synced_snapshot() {
     std::fs::write(&snap_path, snap.to_string()).unwrap();
     let out_path = data_dir.path().join("out.json");
     let out = export_osv(data_dir.path(), &snap_path, &out_path);
-    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(out.status.success(), "{}", stderr_of(&out));
     let docs: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(&out_path).unwrap()).unwrap();
     assert_eq!(docs[0]["affected"][0]["package"]["name"], "evil-pkg");
@@ -709,7 +711,7 @@ fn audit_export_candidates_filters_by_action_or_verdict() {
         ])
         .output()
         .unwrap();
-    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(out.status.success(), "{}", stderr_of(&out));
     let candidates: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(&out_path).unwrap()).unwrap();
     let entries = candidates.as_array().unwrap();
@@ -745,7 +747,7 @@ fn recall_export_osv_accepts_a_snapshot_sitting_exactly_on_the_cap() {
     assert!(
         out.status.success(),
         "a snapshot on the cap must be accepted: {}",
-        stderr(&out)
+        stderr_of(&out)
     );
     assert!(out_path.exists(), "out must be written");
 }
@@ -778,7 +780,7 @@ fn recall_export_osv_creates_a_missing_out_directory() {
     assert!(
         out.status.success(),
         "a missing out directory must be created: {}",
-        stderr(&out)
+        stderr_of(&out)
     );
     assert!(
         out_path.exists(),
@@ -803,7 +805,7 @@ fn recall_export_osv_preserves_mal_ids_and_ecosystem_strings() {
     std::fs::write(&snap_path, snap.to_string()).unwrap();
     let out_path = data_dir.path().join("out.json");
     let out = export_osv(data_dir.path(), &snap_path, &out_path);
-    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(out.status.success(), "{}", stderr_of(&out));
     let docs: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(&out_path).unwrap()).unwrap();
     let docs = docs.as_array().unwrap();
@@ -851,8 +853,4 @@ fn recall_export_osv_refuses_symlink_out() {
         .unwrap();
     assert!(!out.status.success(), "symlink out must be refused");
     assert_eq!(std::fs::read(&victim).unwrap(), b"original");
-}
-
-fn stderr(out: &std::process::Output) -> String {
-    String::from_utf8_lossy(&out.stderr).into_owned()
 }

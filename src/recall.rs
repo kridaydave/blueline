@@ -941,10 +941,8 @@ pub fn serve(port: u16, index: &Path) -> anyhow::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    fn stderr(out: &std::process::Output) -> String {
-        String::from_utf8_lossy(&out.stderr).into_owned()
-    }
     use super::*;
+    use crate::test_support::stderr_of;
 
     #[test]
     fn rfc3339_now_is_rfc3339_and_current() {
@@ -2049,7 +2047,7 @@ mod tests {
             .output()
             .unwrap();
         seed_handle.join().unwrap();
-        assert!(out.status.success(), "{}", stderr(&out));
+        assert!(out.status.success(), "{}", stderr_of(&out));
         let stored_bytes = std::fs::read(&snapshot_path).unwrap();
 
         let (old_url, old_handle) =
@@ -2088,7 +2086,7 @@ mod tests {
             .output()
             .unwrap();
         handle.join().unwrap();
-        assert!(out.status.success(), "{}", stderr(&out));
+        assert!(out.status.success(), "{}", stderr_of(&out));
         let stored: SyncedSnapshot =
             serde_json::from_slice(&std::fs::read(&snapshot_path).unwrap()).unwrap();
         assert_eq!(stored.snapshot.sequence, 42);
@@ -2105,7 +2103,7 @@ mod tests {
             .output()
             .unwrap();
         handle.join().unwrap();
-        assert!(out.status.success(), "{}", stderr(&out));
+        assert!(out.status.success(), "{}", stderr_of(&out));
         let stored: SyncedSnapshot = serde_json::from_slice(
             &std::fs::read(data_dir.path().join("recall_snapshot.json")).unwrap(),
         )
@@ -2124,7 +2122,7 @@ mod tests {
         assert!(
             String::from_utf8_lossy(&out.stderr).contains("exceeds"),
             "{}",
-            stderr(&out)
+            stderr_of(&out)
         );
     }
 
@@ -2169,7 +2167,7 @@ mod tests {
         assert!(
             String::from_utf8_lossy(&out.stderr).contains("exceeds"),
             "{}",
-            stderr(&out)
+            stderr_of(&out)
         );
     }
 
@@ -2396,7 +2394,7 @@ mod tests {
             .output()
             .unwrap();
         seed_handle.join().unwrap();
-        assert!(out.status.success(), "{}", stderr(&out));
+        assert!(out.status.success(), "{}", stderr_of(&out));
 
         let held = SyncLock::acquire(data_dir.path()).unwrap();
 

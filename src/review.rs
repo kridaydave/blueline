@@ -1313,6 +1313,7 @@ fn package_json_path(root: &std::path::Path) -> std::path::PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::has_finding;
 
     fn hint_verdict(findings: Vec<crate::verdict::Finding>) -> crate::verdict::Verdict {
         crate::verdict::Verdict {
@@ -2055,10 +2056,6 @@ mod recursive_tests {
     use crate::registry::{Checksum, ChecksumAlg, Package, Release};
     use crate::store::BaselineStore;
     use std::collections::HashMap;
-
-    fn has_finding(verdict: &crate::verdict::Verdict, rule_id: &str) -> bool {
-        verdict.findings.iter().any(|f| f.rule_id == rule_id)
-    }
 
     struct FakeRegistry {
         packages: HashMap<String, String>,
