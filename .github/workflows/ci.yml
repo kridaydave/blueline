@@ -27,6 +27,9 @@ env:
   BLUELINE_MUTANTS_SKIP: |
     src/lib.rs
     src/error.rs
+  # Shared cargo-mutants exclusions (unbuildable/true-equivalent/fork-bomb/timeout-prone
+  # mutants). Keep in sync with scripts/verify.sh MUTANTS_EXCLUDE.
+  BLUELINE_MUTANTS_EXCLUDE: 'with .*Default::default\(\)|replace && with \|\| in .*|delete ! in (spawn_child|may_spawn_child|may_spawn_child_given|export_osv)|replace may_spawn_child(_given)? -> bool with true|replace <= with > in evaluate_candidates|replace == with != in scan_file|replace < with <= in levenshtein_at_most_one|replace < with > in levenshtein_at_most_one|replace \+= with \*= in levenshtein_at_most_one|replace > with < in levenshtein_at_most_one'
 
 jobs:
   # GitHub compiles a workflow before it runs a single step, and a compile
@@ -326,96 +329,7 @@ jobs:
           SCAN_OUTCOME: ${{ steps.scan.outcome }}
           SCAN_EXIT_CODE: ${{ steps.scan.outputs.scan-exit-code }}
           REPORT_PATH: ${{ steps.scan.outputs.report-path }}
-        run: |
-          python3 - <<'PY'
-          import json, os, sys
-          from pathlib import Path
-
-          lockfile_changed = os.environ.get("LOCKFILE_CHANGED") == "true"
-          scan_outcome = os.environ.get("SCAN_OUTCOME", "unknown")
-          scan_exit = os.environ.get("SCAN_EXIT_CODE", "")
-          report_path = os.environ.get("REPORT_PATH") or "blueline-dogfood.json"
-          summary = Path(os.environ.get("GITHUB_STEP_SUMMARY", "")) if os.environ.get("GITHUB_STEP_SUMMARY") else None
-          Path("artifacts").mkdir(exist_ok=True)
-
-          def add_summary(text):
-              if summary:
-                  with summary.open("a", encoding="utf-8") as fh:
-                      fh.write(text if text.endswith("\n") else text + "\n")
-
-          def fail(code, msg):
-              print(f"::error title=P3 gate.dogfood.health::{msg}")
-              add_summary(f"## P3 gate.dogfood.health — npm dogfood\n\n**FAIL:** {msg}\n\n- scan outcome: `{scan_outcome}` (exit `{scan_exit}`)\n- report path: `{report_path}`\n- lockfile changed: `{lockfile_changed}`\n")
-              sys.exit(code)
-
-          report = Path(report_path)
-          if not report.exists():
-              fail(1, f"scan produced no report file (scan outcome={scan_outcome}, exit={scan_exit}); scanner health cannot be verified")
-          try:
-              r = json.loads(report.read_text(encoding="utf-8"))
-          except Exception as e:
-              fail(1, f"scan report is not valid JSON ({e}); scan outcome={scan_outcome}")
-
-          names = {i["name"] for i in r.get("items", [])}
-          expected = {
-              "@kridaydave/blueline-cli", "blueline-cli",
-              "@kridaydave/binary-darwin-arm64", "@kridaydave/binary-darwin-x64",
-              "@kridaydave/binary-linux-arm64-gnu", "@kridaydave/binary-linux-arm64-musl",
-              "@kridaydave/binary-linux-x64-musl",
-              "@kridaydave/binary-linux-x64-gnu", "@kridaydave/binary-win32-arm64",
-              "@kridaydave/binary-win32-x64",
-          }
-          unknown = names - expected
-          if unknown:
-              fail(1, f"scanner evaluated unknown packages: {sorted(unknown)}")
-
-          rank = {"LOW": 0, "MEDIUM": 1, "HIGH": 2, "BLOCK": 3}
-          bands = [i["verdict"]["band"] for i in r.get("items", [])]
-          unknown_bands = sorted({b for b in bands if b not in rank})
-          if unknown_bands:
-              fail(1, f"scanner emitted unknown bands: {unknown_bands}")
-
-          if r.get("total_evaluated", 0) == 0 and lockfile_changed:
-              fail(1, "package-lock.json changed but the scan evaluated nothing: scanner reviewed no shipped package while the delta was non-empty")
-
-          if bands:
-              for item in r["items"]:
-                  if not item.get("name") or not item.get("new_version"):
-                      fail(1, f"report carries an item with no name or version: {item}")
-              derived = rank[max(bands, key=lambda b: rank[b])]
-              if derived != rank.get(r.get("max_band")):
-                  fail(1, f"max_band {r.get('max_band')} disagrees with reported bands {bands}")
-
-          findings = [
-              (i["name"], i["new_version"], i["verdict"]["band"])
-              for i in r.get("items", [])
-              if rank[i["verdict"]["band"]] >= rank["HIGH"]
-          ]
-
-          if r.get("total_evaluated", 0) == 0:
-              msg = f"scanner healthy (scan outcome={scan_outcome}): lockfile unchanged, nothing to evaluate"
-          else:
-              msg = f"scanner healthy (scan outcome={scan_outcome}): evaluated {r.get('total_evaluated')}, unchanged {r.get('unchanged_count')}, max band {r.get('max_band')}"
-          print(f"::notice title=P3 gate.dogfood.health::{msg}")
-          print(msg)
-          for item in r.get("items", []):
-              print(f"  {item['name']}@{item['new_version']}: {item['verdict']['band']}")
-
-          add_summary(f"## P3 gate.dogfood.health — npm dogfood\n\n**PASS:** {msg}\n\n- lockfile changed: `{lockfile_changed}`\n")
-          if findings:
-              add_summary("## P4 gate.dogfood.risk — findings (not gating)\n\nScanner is healthy. Our own distribution was reviewed; HIGH/BLOCK findings are reported for investigation and may be expected on first-party binary bumps.\n\n| package | version | band |\n| --- | --- | --- |\n")
-              for name, version, band in findings:
-                  add_summary(f"| {name} | {version} | {band} |")
-              add_summary("")
-              risk = {
-                  "schema_version": 1, "kind": "gate", "priority": "P4", "category": "gate.dogfood.risk",
-                  "job": "dogfood", "result": "success", "reason": f"{len(findings)} HIGH/BLOCK finding(s); scanner healthy (not gating)",
-                  "evidence": report_path, "fix_first": "Review findings; many first-party binary bumps are expected, but investigate unexpected packages/changes.",
-                  "details": {"findings": [{"name": n, "version": v, "band": b} for n, v, b in findings], "scan_outcome": scan_outcome, "scan_exit_code": scan_exit},
-              }
-              Path("artifacts/gate-dogfood-risk.json").write_text(json.dumps(risk, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-              print(f"::notice title=P4 gate.dogfood.risk::{len(findings)} HIGH/BLOCK finding(s) recorded; scanner healthy (not gating)")
-          PY
+        run: python3 scripts/ci/dogfood_npm_health.py
       - name: Publish dogfood gate summary
         if: always()
         env:
@@ -493,55 +407,88 @@ jobs:
           else
             POLICY_ARG=()
           fi
-          echo "::notice title=P3 gate.dogfood::Running cargo dogfood scan (--fail-on high); failures may indicate scanner/build issues (P3) or risk findings >= high (P4 gating preserved)."
+          echo "::notice title=P3/P4 gate.dogfood::Running cargo dogfood scan (--fail-on high). Gate preserved; failure classified as P3 (scanner/build/health) or P4 (risk threshold) by best-effort log analysis."
           set +e
           cargo run --locked -- --ecosystem cargo ci --lockfile Cargo.lock --fail-on high --base "$BASE_REF" "${POLICY_ARG[@]}" 2>&1 | tee artifacts/dogfood-cargo.log
           status=${PIPESTATUS[0]}
           set -e
-          echo "exit_code=$status" > artifacts/dogfood-cargo.status
+          printf '%s\n' "$status" > artifacts/dogfood-cargo.status
+          class="health"
+          if [ "$status" -eq 0 ]; then
+            class="pass"
+          elif grep -Eqi 'risk verdict|fail-on|would fail|threshold exceeded|max band|HIGH|BLOCK' artifacts/dogfood-cargo.log; then
+            class="risk"
+          fi
+          printf '%s\n' "$class" > artifacts/dogfood-cargo.class
+          echo "exit_code=$status" >> "$GITHUB_OUTPUT"
+          echo "class=$class" >> "$GITHUB_OUTPUT"
           if [ "$status" -ne 0 ]; then
-            echo "::error title=P3/P4 gate.dogfood::Cargo dogfood failed (exit $status). Check artifacts/dogfood-cargo.log: may be scanner/build/health issue or risk >= high (current gate preserved)."
+            if [ "$class" = "risk" ]; then
+              echo "::error title=P4 gate.dogfood.risk::Cargo dogfood hit preserved --fail-on high (exit $status). See artifacts/dogfood-cargo.log."
+            else
+              echo "::error title=P3 gate.dogfood.health::Cargo dogfood scanner/build/health failure (exit $status). See artifacts/dogfood-cargo.log."
+            fi
             exit "$status"
           fi
-          echo "::notice title=P3 gate.dogfood.health::Cargo dogfood completed successfully."
+          echo "::notice title=P3 gate.dogfood.health::Cargo dogfood completed successfully (no fail-on-high trigger)."
       - name: Publish cargo dogfood gate summary
         if: always()
         env:
           CHANGED: ${{ steps.changed.outputs.changed }}
           STEP_RESULT: ${{ steps.dogfood_cargo.outcome }}
+          EXIT_CODE: ${{ steps.dogfood_cargo.outputs.exit_code }}
+          CLASS: ${{ steps.dogfood_cargo.outputs.class }}
           JOB_STATUS: ${{ job.status }}
         shell: bash
         run: |
-          result="${STEP_RESULT:-}"
-          if [ -z "$result" ]; then
-            [ "${CHANGED}" = "true" ] && result="${JOB_STATUS:-failure}" || result="skipped"
+          set -euo pipefail
+          mkdir -p artifacts
+          step_result="${STEP_RESULT:-}"
+          if [ -z "$step_result" ]; then
+            [ "${CHANGED}" = "true" ] && step_result="${JOB_STATUS:-failure}" || step_result="skipped"
           fi
-          reason="Cargo.lock changed=${CHANGED}. "
+          class="${CLASS:-}"
+          [ -n "$class" ] || [ ! -f artifacts/dogfood-cargo.class ] || class="$(cat artifacts/dogfood-cargo.class)"
+          exit_code="${EXIT_CODE:-}"
+          [ -n "$exit_code" ] || [ ! -f artifacts/dogfood-cargo.status ] || exit_code="$(cat artifacts/dogfood-cargo.status)"
+
           if [ "${CHANGED}" != "true" ]; then
-            reason="${reason}Scan skipped because lockfile did not change."
-          elif [ "$result" = "success" ]; then
-            reason="${reason}cargo dogfood passed with --fail-on high (P4 gate preserved)."
-          else
-            reason="${reason}cargo dogfood failed: inspect artifacts/dogfood-cargo.log to distinguish scanner/build/health issues (P3) from risk findings >= high (P4)."
+            python3 scripts/ci/gate_summary.py --category gate.dogfood.health --priority P3 --job dogfood-cargo --result skipped --reason "Cargo.lock unchanged; scan skipped." --command "cargo run --locked -- --ecosystem cargo ci --lockfile Cargo.lock --fail-on high --base origin/\$BASE_BRANCH [--policy base blueline.toml]" --evidence "job logs" --fix-first "No action needed." --out artifacts/gate-dogfood-cargo.json
+            printf '%s\n' '{"schema_version":1,"kind":"gate","priority":"P4","category":"gate.dogfood.risk","job":"dogfood-cargo","result":"skipped","reason":"Cargo.lock unchanged; risk gate not evaluated.","evidence":"job logs","fix_first":""}' > artifacts/gate-dogfood-cargo-risk.json
+            exit 0
           fi
-          python3 scripts/ci/gate_summary.py \
-            --category gate.dogfood.health \
-            --priority P3 \
-            --job dogfood-cargo \
-            --result "$result" \
-            --reason "$reason" \
-            --command "cargo run --locked -- --ecosystem cargo ci --lockfile Cargo.lock --fail-on high --base origin/\$BASE_BRANCH [--policy base blueline.toml]" \
-            --evidence "artifacts/dogfood-cargo.log and artifacts/dogfood-cargo.status when changed" \
-            --fix-first "If failed, read dogfood-cargo.log first: classify as P3 (scanner/build/base/policy error) or P4 (risk finding). Preserve fail-on-high behavior unless intentionally changed." \
-            --out artifacts/gate-dogfood-cargo.json
+
+          health_result="$step_result"
+          risk_result="success"
+          risk_reason="No preserved --fail-on high trigger detected."
+          risk_fix=""
+          if [ "$step_result" = "success" ]; then
+            health_result="success"
+          elif [ "$class" = "risk" ]; then
+            health_result="success"
+            risk_result="failure"
+            risk_reason="Preserved P4 risk gate triggered (--fail-on high, exit ${exit_code:-?}, best-effort log classification)."
+            risk_fix="Review artifacts/dogfood-cargo.log for >= high findings. Keep gate behavior unless intentionally changed."
+          else
+            health_result="failure"
+            risk_result="skipped"
+            risk_reason="Risk not evaluated because scanner/build/health failed first (P3)."
+            risk_fix="Fix P3 scanner/build/health issue, then re-evaluate risk."
+          fi
+
+          python3 scripts/ci/gate_summary.py --category gate.dogfood.health --priority P3 --job dogfood-cargo --result "$health_result" --reason "Cargo dogfood health: changed=${CHANGED}, class=${class:-unknown}, exit=${exit_code:-n/a}, step=${step_result}. P4 risk recorded separately when classifiable." --command "cargo run --locked -- --ecosystem cargo ci --lockfile Cargo.lock --fail-on high --base origin/\$BASE_BRANCH [--policy base blueline.toml]" --evidence "artifacts/dogfood-cargo.log, artifacts/dogfood-cargo.status, artifacts/dogfood-cargo.class" --fix-first "If P3 fails, fix scanner/build/base/policy/lockfile evaluation before risk triage." --out artifacts/gate-dogfood-cargo.json
+          export risk_result risk_reason risk_fix class exit_code step_result
+          python3 -c "import json,os,pathlib; pathlib.Path('artifacts/gate-dogfood-cargo-risk.json').write_text(json.dumps({'schema_version':1,'kind':'gate','priority':'P4','category':'gate.dogfood.risk','job':'dogfood-cargo','result':os.environ.get('risk_result','unknown'),'reason':os.environ.get('risk_reason',''),'evidence':'artifacts/dogfood-cargo.log, artifacts/dogfood-cargo.status, artifacts/dogfood-cargo.class','fix_first':os.environ.get('risk_fix',''),'details':{'exit_code':os.environ.get('exit_code',''),'class':os.environ.get('class',''),'step_result':os.environ.get('step_result','')}},indent=2,sort_keys=True)+'\\n')"
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: blueline-gate-dogfood-cargo
           path: |
             artifacts/gate-dogfood-cargo.json
+            artifacts/gate-dogfood-cargo-risk.json
             artifacts/dogfood-cargo.log
             artifacts/dogfood-cargo.status
+            artifacts/dogfood-cargo.class
           if-no-files-found: warn
 
   # Mutation testing guards the trust boundary: it proves the test suite would
@@ -638,7 +585,7 @@ jobs:
         id: mutants_pass1
         continue-on-error: true
         env:
-          BLUELINE_MUTANTS_EXCLUDE: 'with .*Default::default\(\)|replace && with \|\| in .*|delete ! in (spawn_child|may_spawn_child|may_spawn_child_given|export_osv)|replace may_spawn_child(_given)? -> bool with true|replace <= with > in evaluate_candidates|replace == with != in scan_file|replace < with <= in levenshtein_at_most_one|replace < with > in levenshtein_at_most_one|replace \+= with \*= in levenshtein_at_most_one|replace > with < in levenshtein_at_most_one'
+          # Uses workflow-level BLUELINE_MUTANTS_EXCLUDE
         run: |
           echo "::notice title=P1 gate.security.mutation::Shard ${{ matrix.shard }}/32 pass1 (in-diff, src/**/*.rs) starting"
           cargo mutants --in-diff pr.diff --shard ${{ matrix.shard }}/32 \
@@ -659,7 +606,7 @@ jobs:
         id: mutants_pass2
         continue-on-error: true
         env:
-          BLUELINE_MUTANTS_EXCLUDE: 'with .*Default::default\(\)|replace && with \|\| in .*|delete ! in (spawn_child|may_spawn_child|may_spawn_child_given|export_osv)|replace may_spawn_child(_given)? -> bool with true|replace <= with > in evaluate_candidates|replace == with != in scan_file|replace < with <= in levenshtein_at_most_one|replace < with > in levenshtein_at_most_one|replace \+= with \*= in levenshtein_at_most_one|replace > with < in levenshtein_at_most_one'
+          # Uses workflow-level BLUELINE_MUTANTS_EXCLUDE
         shell: bash
         run: |
           set -euo pipefail
@@ -713,6 +660,12 @@ jobs:
             artifacts/mutants-shard-summary.json
             artifacts/pass1/
             artifacts/pass2/
+          if-no-files-found: warn
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: blueline-gate-mutant-shard-pr-${{ matrix.shard }}
+          path: artifacts/mutants-shard-summary.json
           if-no-files-found: warn
       - name: Fail shard if any mutation pass failed
         if: always()
@@ -817,7 +770,7 @@ jobs:
         id: mutants_pass1
         continue-on-error: true
         env:
-          BLUELINE_MUTANTS_EXCLUDE: 'with .*Default::default\(\)|replace && with \|\| in .*|delete ! in (spawn_child|may_spawn_child|may_spawn_child_given|export_osv)|replace may_spawn_child(_given)? -> bool with true|replace <= with > in evaluate_candidates|replace == with != in scan_file|replace < with <= in levenshtein_at_most_one|replace < with > in levenshtein_at_most_one|replace \+= with \*= in levenshtein_at_most_one|replace > with < in levenshtein_at_most_one'
+          # Uses workflow-level BLUELINE_MUTANTS_EXCLUDE
         run: |
           echo "::notice title=P1 gate.security.mutation::Push shard ${{ matrix.shard }}/32 pass1 (in-diff, src/**/*.rs) starting"
           cargo mutants --in-diff push.diff --shard ${{ matrix.shard }}/32 \
@@ -838,7 +791,7 @@ jobs:
         id: mutants_pass2
         continue-on-error: true
         env:
-          BLUELINE_MUTANTS_EXCLUDE: 'with .*Default::default\(\)|replace && with \|\| in .*|delete ! in (spawn_child|may_spawn_child|may_spawn_child_given|export_osv)|replace may_spawn_child(_given)? -> bool with true|replace <= with > in evaluate_candidates|replace == with != in scan_file|replace < with <= in levenshtein_at_most_one|replace < with > in levenshtein_at_most_one|replace \+= with \*= in levenshtein_at_most_one|replace > with < in levenshtein_at_most_one'
+          # Uses workflow-level BLUELINE_MUTANTS_EXCLUDE
         shell: bash
         run: |
           set -euo pipefail
@@ -892,6 +845,12 @@ jobs:
             artifacts/mutants-shard-summary.json
             artifacts/pass1/
             artifacts/pass2/
+          if-no-files-found: warn
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: blueline-gate-mutant-shard-push-${{ matrix.shard }}
+          path: artifacts/mutants-shard-summary.json
           if-no-files-found: warn
       - name: Fail shard if any mutation pass failed
         if: always()
