@@ -584,8 +584,7 @@ jobs:
       - name: "Mutate changed lines (pass 1: src/**/*.rs glob)"
         id: mutants_pass1
         continue-on-error: true
-        env:
-          # Uses workflow-level BLUELINE_MUTANTS_EXCLUDE
+        # Uses workflow-level BLUELINE_MUTANTS_EXCLUDE
         run: |
           echo "::notice title=P1 gate.security.mutation::Shard ${{ matrix.shard }}/32 pass1 (in-diff, src/**/*.rs) starting"
           cargo mutants --in-diff pr.diff --shard ${{ matrix.shard }}/32 \
@@ -605,8 +604,7 @@ jobs:
       - name: "Mutate changed lines (pass 2: explicit src files)"
         id: mutants_pass2
         continue-on-error: true
-        env:
-          # Uses workflow-level BLUELINE_MUTANTS_EXCLUDE
+        # Uses workflow-level BLUELINE_MUTANTS_EXCLUDE
         shell: bash
         run: |
           set -euo pipefail
@@ -769,8 +767,7 @@ jobs:
       - name: "Mutate changed lines (pass 1: src/**/*.rs glob)"
         id: mutants_pass1
         continue-on-error: true
-        env:
-          # Uses workflow-level BLUELINE_MUTANTS_EXCLUDE
+        # Uses workflow-level BLUELINE_MUTANTS_EXCLUDE
         run: |
           echo "::notice title=P1 gate.security.mutation::Push shard ${{ matrix.shard }}/32 pass1 (in-diff, src/**/*.rs) starting"
           cargo mutants --in-diff push.diff --shard ${{ matrix.shard }}/32 \
@@ -790,8 +787,7 @@ jobs:
       - name: "Mutate changed lines (pass 2: explicit src files)"
         id: mutants_pass2
         continue-on-error: true
-        env:
-          # Uses workflow-level BLUELINE_MUTANTS_EXCLUDE
+        # Uses workflow-level BLUELINE_MUTANTS_EXCLUDE
         shell: bash
         run: |
           set -euo pipefail
