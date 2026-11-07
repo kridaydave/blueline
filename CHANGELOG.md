@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- **CI inspectability overhaul.** GitHub Actions now publishes per-gate summaries and `blueline-gate-*` artifacts (`gate_summary.py`) for fmt, clippy, tests, workflow lint, references, supply-chain audit, and dogfood jobs, plus a `ci-triage` job that writes a fix-first summary (`P0` Rust gate → `P1` security/audit/mutation → `P2` workflow/docs → `P3` dogfood health → `P4` dogfood risk). Mutation shards emit `mutants-shard-summary.json` with pass outcomes/root-cause classes, keep the in-diff double pass inspectable, and both PR and push mutation runs now have aggregates. The composite action (`.github/actions/blueline-ci`) reports scan outputs/summary details, and `scripts/verify.sh` labels stages with CI categories/priorities and parity notes. `actionlint` is still required after `.github/` changes; it was not installed in this environment.
+
 ### Fixed
 
 - **rustls-webpki bumped to 0.103.16 and webpki-roots to 1.0.10**, clearing

@@ -19,3 +19,7 @@ packages/@kridaydave/binary-*/blueline.exe
 
 .useit/
 .perfwork/
+
+# Python cache
+__pycache__/
+*.pyc

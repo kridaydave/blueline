@@ -39,10 +39,25 @@ inputs:
     required: false
     default: 'true'
 
+outputs:
+  binary-path:
+    description: 'Resolved blueline binary path'
+    value: ${{ steps.resolve.outputs.binary-path }}
+  report-path:
+    description: 'Resolved report/output file path, if requested'
+    value: ${{ steps.scan.outputs.report-path }}
+  scan-exit-code:
+    description: 'blueline ci exit code (0 on success)'
+    value: ${{ steps.scan.outputs.scan-exit-code }}
+  base-ref-resolved:
+    description: 'Git base ref used for the scan'
+    value: ${{ steps.scan.outputs.base-ref-resolved }}
+
 runs:
   using: 'composite'
   steps:
     - name: Resolve Blueline binary
+      id: resolve
       shell: bash
       env:
         INPUT_VERSION: ${{ inputs.version }}
@@ -64,6 +79,7 @@ runs:
         if [ "$INPUT_BUILD_FROM_SOURCE" = "true" ]; then
           cargo build --locked --release
           printf '%s' "$PWD/target/release/blueline" > "$OUT_DIR/path"
+          echo "binary-path=$PWD/target/release/blueline" >> "$GITHUB_OUTPUT"
           exit 0
         fi
 
@@ -126,8 +142,10 @@ runs:
 
         chmod +x "$ASSET"
         printf '%s' "$OUT_DIR/$ASSET" > "$OUT_DIR/path"
+        echo "binary-path=$OUT_DIR/$ASSET" >> "$GITHUB_OUTPUT"
 
     - name: Run Blueline CI Scan
+      id: scan
       shell: bash
       env:
         INPUT_BASE_REF: ${{ inputs.base-ref }}
@@ -138,11 +156,13 @@ runs:
       run: |
         set -euo pipefail
         BLUELINE="$(cat "${RUNNER_TEMP}/blueline-bin/path")"
-        [ -x "$BLUELINE" ] || { echo "::error::blueline binary missing at $BLUELINE" && exit 1; }
+        [ -x "$BLUELINE" ] || { echo "::error title=P3 gate.dogfood.health::blueline binary missing at $BLUELINE" && exit 1; }
         BASE="${INPUT_BASE_REF:-${GITHUB_BASE_REF:-origin/main}}"
         if ! git rev-parse --verify --quiet "$BASE" >/dev/null 2>&1; then
           BASE="origin/$BASE"
         fi
+        echo "base-ref-resolved=$BASE" >> "$GITHUB_OUTPUT"
+        echo "report-path=${INPUT_OUTPUT_FILE}" >> "$GITHUB_OUTPUT"
         ARGS=(ci --base "$BASE" --lockfile "$INPUT_LOCKFILE_PATH" --fail-on "$INPUT_FAIL_ON")
         if [ -n "$INPUT_POLICY_PATH" ]; then
           ARGS+=(--policy "$INPUT_POLICY_PATH")
@@ -152,4 +172,23 @@ runs:
         fi
 
         echo "Executing: blueline ${ARGS[*]}"
+        set +e
         "$BLUELINE" "${ARGS[@]}"
+        status=$?
+        set -e
+        echo "scan-exit-code=$status" >> "$GITHUB_OUTPUT"
+        if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
+          {
+            echo "## blueline-ci action scan"
+            echo ""
+            echo "- base ref: \`$BASE\`"
+            echo "- lockfile: \`$INPUT_LOCKFILE_PATH\`"
+            echo "- fail-on: \`$INPUT_FAIL_ON\`"
+            echo "- report: \`${INPUT_OUTPUT_FILE:-<none>}\`"
+            echo "- exit code: \`$status\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+        fi
+        if [ "$status" -ne 0 ]; then
+          echo "::error title=P3/P4 gate.dogfood::blueline ci scan failed (exit $status). Check scan output/report; may be scanner/health issue (P3) or risk threshold/finding gate (P4) depending on fail-on and context."
+        fi
+        exit "$status"
