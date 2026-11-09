@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- **Auto-update check on run.** Blueline now queries crates.io for a newer
+  published version and prints a single notice to stderr when one exists
+  (opt out with `BLUEDISABLE_UPDATE_CHECK=1`). Network errors are ignored
+  and never block a command.
+
 - **Tiered verification infrastructure.** Level 1 fills the PR-gate gaps: a
   report-only `coverage` job (cargo-llvm-cov, lcov artifact + step summary), a
   `semver` job (cargo-semver-checks against the PR base, guarding the public
