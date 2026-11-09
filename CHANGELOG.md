@@ -80,6 +80,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   `provenance::tests::stale_provenance_cache_row_reverifies_npm`,
   `provenance::tests::provenance_cache_happy_hit_still_works_npm`).
 
+- **`policy.advisories.block_on_malware = false` is now honored for malware advisories.**
+  The R09 malware-advisory arm always forced a `Block` verdict, ignoring the
+  policy flag. When `block_on_malware` is false the finding now uses the hit's
+  own severity; default-true behavior is unchanged
+  (`heuristic::tests::blocks_on_malware_advisory`,
+  `heuristic::tests::block_on_malware_flag_false_uses_advisory_severity`).
+
+- **A corrupt `known_clean` version row now fails closed.** `list_clean_versions`
+  silently dropped rows whose version string could not be parsed, masking trust-
+  anchor corruption. An unparseable version now returns `BluelineError::Store`
+  naming the package and row
+  (`store::tests::corrupt_known_clean_version_row_is_rejected`).
+
 - **rustls-webpki bumped to 0.103.16 and webpki-roots to 1.0.10**, clearing
   RUSTSEC-2026-0382 and RUSTSEC-2026-0381 (distrusted emSign intermediates;
   CVE-2026-111943). The fix ships the 8 `.spki.der` key blobs that motivated

@@ -666,9 +666,12 @@ impl BaselineStore {
         for row in rows {
             let (v_str, integ) = row
                 .map_err(|e| BluelineError::Store(format!("reading clean row for {name}: {e}")))?;
-            if let Ok(v) = V::parse(&v_str) {
-                versions.push((v, integ));
-            }
+            let v = V::parse(&v_str).map_err(|e| {
+                BluelineError::Store(format!(
+                    "corrupt known_clean row for {name}: unparseable version {v_str:?} ({e})"
+                ))
+            })?;
+            versions.push((v, integ));
         }
         versions.sort_by(|a, b| b.0.cmp(&a.0));
         Ok(versions)
@@ -1562,6 +1565,38 @@ mod tests {
             store
                 .mark_clean(Ecosystem::Npm, "pkg", "1.0.0", &ck("wrong"))
                 .is_err()
+        );
+    }
+
+    #[test]
+    fn corrupt_known_clean_version_row_is_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = BaselineStore::open_at(&dir.path().join("t.db")).unwrap();
+        let checksum = ck("good").to_sri().unwrap();
+        store
+            .conn
+            .execute(
+                "INSERT INTO known_clean (ecosystem, name, version, integrity, clean)
+                 VALUES ('npm', 'broken-pkg', 'not-a-semver!!!', ?1, 1)",
+                rusqlite::params![checksum],
+            )
+            .unwrap();
+
+        let err = store
+            .list_clean_versions::<semver::Version>(Ecosystem::Npm, "broken-pkg")
+            .expect_err("corrupt version row must be an error, not silently skipped");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("broken-pkg"),
+            "error must name the package: {msg}"
+        );
+        assert!(
+            msg.contains("not-a-semver!!!"),
+            "error must name the corrupt row: {msg}"
+        );
+        assert!(
+            msg.contains("corrupt"),
+            "error must identify corruption: {msg}"
         );
     }
 
