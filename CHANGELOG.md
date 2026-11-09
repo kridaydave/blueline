@@ -507,6 +507,17 @@ Targeted at 0.4.0. This release is a behaviour change for anyone who set
   "design target, not shipped code" header replaced, and resolved open risks
   marked as resolved.
 
+- **Crates.io packaging prep.** `Cargo.toml` now declares `readme = "README.md"`
+  and an `include` list so the published crate ships only `src/`, `Cargo.toml`,
+  `Cargo.lock`, `LICENSE`, `README.md`, and `CHANGELOG.md`. The README
+  quickstart switches to `cargo install blueline` plus a `blueline review`
+  invocation, with the clone-and-build steps moved to a contributor subsection.
+- **Proptest tightening in `tests/properties.rs`.** `policy_toml_roundtrip` now
+  uses `prop_assume!` to discard generator-emitted invalid documents and
+  `expect`s the parse to succeed once assumed valid, instead of silently
+  returning `Ok(())` on a parse failure (which masked suspicious skips in local
+  runs).
+
 ### Removed
 
 - `BaselineResolution::display_summary`, which had no caller outside its own

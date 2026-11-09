@@ -295,13 +295,8 @@ proptest! {
     /// round-trip is what catches it.
     #[test]
     fn policy_toml_roundtrip(doc in policy_toml_strategy()) {
-        let policy = match Policy::from_toml_str(&doc) {
-            Ok(p) => p,
-            // Fail-closed refusal of a document is allowed; the generators
-            // produce valid documents by construction, so anything rejected
-            // here shows up in local runs as a suspicious skip.
-            Err(_) => return Ok(()),
-        };
+        prop_assume!(Policy::from_toml_str(&doc).is_ok(), "generator emitted an invalid document");
+        let policy = Policy::from_toml_str(&doc).expect("prop_assume guarantees the document parses");
         let reserialized = toml::to_string(&policy).expect("parsed policy re-serializes");
         let reparsed = match Policy::from_toml_str(&reserialized) {
             Ok(p) => p,
