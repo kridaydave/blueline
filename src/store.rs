@@ -482,9 +482,7 @@ impl BaselineStore {
                 // Missing table / duplicate column: defer to schema checks or
                 // treat as already upgraded. Schema verification is the
                 // authority on what a usable store looks like.
-                if !msg.contains("duplicate column name")
-                    && !msg.contains("no such table")
-                {
+                if !msg.contains("duplicate column name") && !msg.contains("no such table") {
                     return Err(BluelineError::Store(format!(
                         "upgrading provenance cache schema: {e}"
                     )));

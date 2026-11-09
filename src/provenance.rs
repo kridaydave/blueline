@@ -180,9 +180,12 @@ struct InTotoConfigSource {
     entry_point: Option<String>,
 }
 
-
 fn subject_digest_string(expected_integrity: &crate::registry::Checksum) -> String {
-    format!("{}:{}", expected_integrity.alg.name(), expected_integrity.value_hex)
+    format!(
+        "{}:{}",
+        expected_integrity.alg.name(),
+        expected_integrity.value_hex
+    )
 }
 
 /// Parse and verify a Sigstore / SLSA in-toto statement against the tarball
@@ -1531,10 +1534,8 @@ mod tests {
 
         // A 500 would force an unverified/error path if fetched; cache hit must
         // return the cached attestation without consulting the server.
-        let server = provenance_status_server(
-            "HTTP/1.1 500 Internal Server Error",
-            r#"{"error":"boom"}"#,
-        );
+        let server =
+            provenance_status_server("HTTP/1.1 500 Internal Server Error", r#"{"error":"boom"}"#);
         let report = inspect_provenance(
             "lodash",
             "4.17.20",
@@ -1554,5 +1555,4 @@ mod tests {
             "cached signature validity must be preserved: {report:?}"
         );
     }
-
 }
