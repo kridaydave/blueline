@@ -47,6 +47,9 @@ intentional. `test` and `lint` are excluded by construction.
 - **All three caps use `.take(MAX + 1)` then strict `>`.** Exactly-at-cap
   succeeds (`accepts_at_manifest_cap`, `srcinfo_line_cap_boundary_is_exact`),
   cap+1 fails. Changing `>` to `>=` makes the cap exclusive and breaks both.
+  The packed `Cargo.toml` reader bounds the read before UTF-8 decoding, so an
+  oversize file with invalid bytes reports the cap, pinned by
+  `oversize_packed_cargo_toml_reports_cap_before_utf8`.
 - **PyPI `entry_points.txt` content is never parsed.** `R02_ENTRY_POINTS_SCRIPT`
   is a pure path-suffix test in `heuristic.rs`. A `console_scripts` entry
   pointing at an unexpected module is not detected — the rule only says "this

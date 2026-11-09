@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- **Packed `Cargo.toml` now bounds its read before the cap check.** It used
+  `read_to_string` (full allocation) before measuring, so an oversize packed
+  manifest was read whole and invalid bytes masked the cap error. It now reads
+  through `take(cap + 1)` like `package.json`.
+
 - **An oversized baseline is now opaque instead of line-diffed.** The target
   side was capped at 2 MiB but the baseline side was read whole, so a baseline
   file over the cap with a small text target was fully read and diffed. Both

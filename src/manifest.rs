@@ -185,19 +185,35 @@ fn dep_req_display(req: &toml::Value) -> String {
 /// Read and parse a packed `Cargo.toml` from an extracted `.crate`, under the
 /// same size cap as every other untrusted manifest.
 pub fn read_packed_cargo_toml(path: &Path) -> Result<PackedCargoToml, BluelineError> {
+    use std::io::Read;
     let display_path = path.display().to_string();
-    let raw = fs::read_to_string(path).map_err(|e| {
+    let file = fs::File::open(path).map_err(|e| {
         BluelineError::Manifest(
             display_path.clone(),
             format!("cannot read packed Cargo.toml: {e}"),
         )
     })?;
-    if raw.len() as u64 > MAX_MANIFEST_BYTES {
+    let mut bytes = Vec::new();
+    file.take(MAX_MANIFEST_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|e| {
+            BluelineError::Manifest(
+                display_path.clone(),
+                format!("cannot read packed Cargo.toml: {e}"),
+            )
+        })?;
+    if bytes.len() as u64 > MAX_MANIFEST_BYTES {
         return Err(BluelineError::Manifest(
             display_path,
             format!("manifest exceeds cap of {MAX_MANIFEST_BYTES} bytes"),
         ));
     }
+    let raw = String::from_utf8(bytes).map_err(|e| {
+        BluelineError::Manifest(
+            display_path.clone(),
+            format!("cannot read packed Cargo.toml: {e}"),
+        )
+    })?;
     toml::from_str(&raw)
         .map_err(|e| BluelineError::Manifest(display_path, format!("invalid TOML: {e}")))
 }
@@ -630,6 +646,21 @@ std = []
         fs::write(&path, &body).unwrap();
         let err = read_packed_cargo_toml(&path).unwrap_err().to_string();
         assert!(err.contains("exceeds cap"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn oversize_packed_cargo_toml_reports_cap_before_utf8() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("Cargo.toml");
+        // Invalid UTF-8 past the cap: a full `read_to_string` fails on the
+        // encoding before the cap check runs; a bounded read reports the cap.
+        let body = vec![0xffu8; MAX_MANIFEST_BYTES as usize + 1];
+        fs::write(&path, &body).unwrap();
+        let err = read_packed_cargo_toml(&path).unwrap_err().to_string();
+        assert!(
+            err.contains("exceeds cap"),
+            "oversize must report the cap, got: {err}"
+        );
     }
 
     #[test]
