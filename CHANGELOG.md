@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- **An oversized baseline is now opaque instead of line-diffed.** The target
+  side was capped at 2 MiB but the baseline side was read whole, so a baseline
+  file over the cap with a small text target was fully read and diffed. Both
+  sides now read through a bounded reader and an over-cap side yields
+  `OpaqueTooLarge` with zero lines.
+
 - **rustls-webpki bumped to 0.103.16 and webpki-roots to 1.0.10**, clearing
   RUSTSEC-2026-0382 and RUSTSEC-2026-0381 (distrusted emSign intermediates;
   CVE-2026-111943). The fix ships the 8 `.spki.der` key blobs that motivated

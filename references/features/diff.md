@@ -23,7 +23,10 @@ blueline mcp   # inspect_diff tool returns the delta as text
 ## Driving it
 `MAX_DIFF_FILE_BYTES: u64 = 2 * 1024 * 1024` is the **only** cap in the module.
 `classify_bytes` order: size → `contains(&0)` → `from_utf8` error → `Text`.
-`similar::TextDiff::from_lines` then `iter_all_changes()` counts
+`diff_single_file` reads each side through `read_capped_file` (`take(MAX + 1)`):
+an oversized baseline now yields `OpaqueTooLarge` (zero lines, no diff) instead
+of a whole-file read and line diff. `an_oversized_baseline_is_opaque_not_line_diffed`
+pins it. `similar::TextDiff::from_lines` then `iter_all_changes()` counts
 `Insert`/`Delete`. Unified text uses `context_radius(3)` and headers
 `a/{rel}` / `b/{rel}`.
 

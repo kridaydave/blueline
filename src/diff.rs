@@ -475,6 +475,30 @@ fn rel_display_at(p: &Path) -> String {
     p.to_string_lossy().into_owned()
 }
 
+fn read_capped_file(path: &Path, side: &str) -> Result<Option<Vec<u8>>, BluelineError> {
+    let file =
+        fs::File::open(path).map_err(|e| BluelineError::Extraction(format!("read {side}: {e}")))?;
+    let mut buf = Vec::new();
+    file.take(MAX_DIFF_FILE_BYTES + 1)
+        .read_to_end(&mut buf)
+        .map_err(|e| BluelineError::Extraction(format!("read {side}: {e}")))?;
+    if buf.len() as u64 > MAX_DIFF_FILE_BYTES {
+        return Ok(None);
+    }
+    Ok(Some(buf))
+}
+
+fn opaque_change(rel_path: &str, target_meta: &DiskFileMeta) -> FileChange {
+    FileChange {
+        relative_path: rel_path.to_string(),
+        kind: FileKind::OpaqueTooLarge,
+        lines_added: 0,
+        lines_deleted: 0,
+        is_executable: target_meta.is_executable,
+        unified_diff: None,
+    }
+}
+
 fn diff_single_file(
     old_path: Option<&Path>,
     new_path: Option<&Path>,
@@ -496,11 +520,17 @@ fn diff_single_file(
     }
 
     let old_bytes = match old_path {
-        Some(p) => fs::read(p).map_err(|e| BluelineError::Extraction(format!("read old: {e}")))?,
+        Some(p) => match read_capped_file(p, "old")? {
+            Some(b) => b,
+            None => return Ok(opaque_change(rel_path, target_meta)),
+        },
         None => Vec::new(),
     };
     let new_bytes = match new_path {
-        Some(p) => fs::read(p).map_err(|e| BluelineError::Extraction(format!("read new: {e}")))?,
+        Some(p) => match read_capped_file(p, "new")? {
+            Some(b) => b,
+            None => return Ok(opaque_change(rel_path, target_meta)),
+        },
         None => Vec::new(),
     };
 
@@ -886,6 +916,68 @@ mod tests {
             err.to_string().contains("baseline bytes are not UTF-8"),
             "{err}"
         );
+    }
+
+    #[test]
+    fn an_oversized_baseline_is_opaque_not_line_diffed() {
+        let old_dir = tempfile::tempdir().unwrap();
+        let new_dir = tempfile::tempdir().unwrap();
+        let big = "a".repeat((MAX_DIFF_FILE_BYTES + 1024) as usize);
+        fs::write(old_dir.path().join("payload.txt"), &big).unwrap();
+        fs::write(new_dir.path().join("payload.txt"), "tiny\n").unwrap();
+        fs::write(old_dir.path().join("small.txt"), "old\n").unwrap();
+        fs::write(new_dir.path().join("small.txt"), "new\n").unwrap();
+
+        let base_m = PackageJson {
+            name: "test".into(),
+            version: "1.0.0".into(),
+            gypfile: None,
+            scripts: BTreeMap::new(),
+            dependencies: BTreeMap::new(),
+            optional_dependencies: BTreeMap::new(),
+            peer_dependencies: BTreeMap::new(),
+        };
+        let target_m = PackageJson {
+            name: "test".into(),
+            version: "1.1.0".into(),
+            gypfile: None,
+            scripts: BTreeMap::new(),
+            dependencies: BTreeMap::new(),
+            optional_dependencies: BTreeMap::new(),
+            peer_dependencies: BTreeMap::new(),
+        };
+        let delta = compute_delta(
+            Some(old_dir.path()),
+            Some(&base_m),
+            Some("1.0.0"),
+            new_dir.path(),
+            &target_m,
+            "1.1.0",
+        )
+        .unwrap();
+
+        let big_change = delta
+            .files_modified
+            .iter()
+            .find(|f| f.relative_path == "payload.txt")
+            .unwrap();
+        assert_eq!(
+            big_change.kind,
+            FileKind::OpaqueTooLarge,
+            "an oversized baseline with a small target must not be line-diffed"
+        );
+        assert_eq!(big_change.lines_added, 0);
+        assert_eq!(big_change.lines_deleted, 0);
+        assert!(big_change.unified_diff.is_none());
+
+        let small_change = delta
+            .files_modified
+            .iter()
+            .find(|f| f.relative_path == "small.txt")
+            .unwrap();
+        assert_eq!(small_change.kind, FileKind::Text);
+        assert_eq!(small_change.lines_added, 1);
+        assert_eq!(small_change.lines_deleted, 1);
     }
 
     #[test]
