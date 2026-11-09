@@ -58,7 +58,9 @@ All managers: `if [ -n "${BLUELINE_POLICY:-}" ]; then args+=(--policy "$BLUELINE
 - **`find_on_path` skips the shim directory**, so a shim can never delegate to
   another shim or to itself. Not found ⇒
   `"no real \`{name}\` binary found on PATH (excluding the shim directory);
-  refusing to write a shim that cannot exec anything"`.
+  refusing to write a shim that cannot exec anything"`. A missing shim dir is
+  an error (`shim_dir_or_err`), never a dummy path — a fallback would drop
+  the exclusion, pinned by `a_missing_shim_dir_is_an_error_not_a_dummy_path`.
 - **The pip/pip3 shim pre-filter is LOOSER than the gate's own rule.** It exits
   2 on any pip flag except `-q`/`--quiet` (including harmless `--no-deps`),
   while `install_ref::pip_non_registry_shape` denies only the 8 `DANGEROUS`

@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- **A missing shim directory is now propagated instead of replaced with a dummy
+  path.** `resolve_package_manager` discarded the error with `unwrap_or("/nonexistent")`,
+  losing the shim-dir exclusion; it now fails closed via `shim_dir_or_err`.
+
 - **Packed `Cargo.toml` now bounds its read before the cap check.** It used
   `read_to_string` (full allocation) before measuring, so an oversize packed
   manifest was read whole and invalid bytes masked the cap error. It now reads

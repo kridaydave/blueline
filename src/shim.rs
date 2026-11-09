@@ -21,16 +21,19 @@ fn default_dir() -> anyhow::Result<PathBuf> {
     Ok(base.join("blueline").join("shims"))
 }
 
+/// A missing shim directory is an error, never a dummy path: falling back to
+/// `/nonexistent` silently dropped the exclusion, so a shim-first PATH could
+/// resolve the blueline shim itself as the real manager.
+fn shim_dir_or_err(dir: Option<PathBuf>) -> anyhow::Result<PathBuf> {
+    dir.ok_or_else(|| anyhow::anyhow!("could not determine the platform data directory"))
+}
+
 /// Resolve a real package manager, excluding this project's own shim
 /// directory. Shared with the install path so a shim can never delegate to
 /// itself there either.
 pub(crate) fn resolve_package_manager(name: &str) -> anyhow::Result<PathBuf> {
-    let dir = default_dir();
-    find_on_path(
-        name,
-        dir.as_deref()
-            .unwrap_or(std::path::Path::new("/nonexistent")),
-    )
+    let dir = shim_dir_or_err(default_dir().ok())?;
+    find_on_path(name, &dir)
 }
 
 /// Locate the real package-manager binary on PATH, skipping the shim
@@ -307,6 +310,22 @@ mod tests {
             "resolved shim dir must end with shims: {}",
             dir.display()
         );
+    }
+
+    #[test]
+    fn a_missing_shim_dir_is_an_error_not_a_dummy_path() {
+        let err = shim_dir_or_err(None).expect_err("a missing shim dir must fail closed");
+        assert!(
+            err.to_string()
+                .contains("could not determine the platform data directory"),
+            "unexpected error: {err}"
+        );
+        for p in ["/a/shims", "/b/other"] {
+            assert_eq!(
+                shim_dir_or_err(Some(PathBuf::from(p))).unwrap(),
+                PathBuf::from(p)
+            );
+        }
     }
 
     #[test]
