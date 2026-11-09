@@ -85,8 +85,10 @@ Rule wiring (`heuristic.rs`):
   `trust_sources.provenance` is absent for those ecosystems.
 - **`[provenance] allowed_builders` is a dead knob** — never read anywhere.
   Only `allowed_repositories` is consulted, via `P03_UNAUTHORIZED_BUILD_REPO`.
-- **`is_repo_allowed` matches on path boundaries only**: exact
-  `eq_ignore_ascii_case`, or `strip_suffix(pattern)` where the remainder ends
-  with `'/'` or `':'`. `enforces_repository_boundary_matching` pins rejection of
-  `github.com/org/app-malicious`, `github.com/attacker-org/app`, and
-  `github.com/attacker/org/app`. A `None` `source_repo` is a *silent pass*.
+- **`is_repo_allowed` requires host equality for host-qualified patterns** and
+  matches on path boundaries: exact `eq_ignore_ascii_case`, the repository path
+  under the same host as the pattern, or the pattern as a path suffix at a `/`
+  or `:` boundary when the pattern carries no host. `enforces_repository_boundary_matching`
+  pins rejection of `github.com/org/app-malicious`, `github.com/attacker-org/app`,
+  `github.com/attacker/org/app`, and `evil.com/github.com/org/app`. A `None`
+  `source_repo` is a *silent pass*.

@@ -1773,6 +1773,46 @@ fn normalize_repo_uri(mut s: &str) -> &str {
 
 /// Check if a provenance repository matches an allowed repository pattern on path boundaries.
 pub fn is_repo_allowed(provenance_repo: &str, allowed_pattern: &str) -> bool {
+    fn split_host_path(s: &str) -> (&str, &str) {
+        let slash = s.find('/');
+        let colon = s.find(':');
+        match (slash, colon) {
+            (Some(slash_pos), Some(colon_pos)) if colon_pos < slash_pos => {
+                let between = &s[colon_pos + 1..slash_pos];
+                if !between.is_empty() && between.bytes().all(|b| b.is_ascii_digit()) {
+                    (&s[..slash_pos], &s[slash_pos + 1..])
+                } else {
+                    (&s[..colon_pos], &s[colon_pos + 1..])
+                }
+            }
+            (Some(slash_pos), _) => (&s[..slash_pos], &s[slash_pos + 1..]),
+            (None, Some(colon_pos)) => (&s[..colon_pos], &s[colon_pos + 1..]),
+            (None, None) => ("", s),
+        }
+    }
+
+    fn eq_or_deeper(repo_path: &str, pattern_path: &str) -> bool {
+        if repo_path.eq_ignore_ascii_case(pattern_path) {
+            return true;
+        }
+        repo_path.len() > pattern_path.len()
+            && repo_path.as_bytes()[pattern_path.len()] == b'/'
+            && repo_path[..pattern_path.len()].eq_ignore_ascii_case(pattern_path)
+    }
+
+    fn eq_or_suffix_boundary(repo_path: &str, pattern_path: &str) -> bool {
+        if eq_or_deeper(repo_path, pattern_path) {
+            return true;
+        }
+        if repo_path.len() > pattern_path.len() {
+            let start = repo_path.len() - pattern_path.len();
+            let boundary = repo_path.as_bytes()[start - 1];
+            return (boundary == b'/' || boundary == b':')
+                && repo_path[start..].eq_ignore_ascii_case(pattern_path);
+        }
+        false
+    }
+
     let norm_repo = normalize_repo_uri(provenance_repo);
     let norm_pattern = normalize_repo_uri(allowed_pattern);
 
@@ -1780,13 +1820,22 @@ pub fn is_repo_allowed(provenance_repo: &str, allowed_pattern: &str) -> bool {
         return true;
     }
 
-    if let Some(stripped) = norm_repo.strip_suffix(norm_pattern)
-        && (stripped.ends_with('/') || stripped.ends_with(':'))
-    {
-        return true;
-    }
+    let (repo_host, repo_path) = split_host_path(norm_repo);
+    let (pattern_host, pattern_path) = split_host_path(norm_pattern);
+    let pattern_has_host =
+        !pattern_host.is_empty() && (pattern_host.contains('.') || pattern_host.contains(':'));
 
-    false
+    if pattern_has_host {
+        if repo_host.is_empty() || !repo_host.eq_ignore_ascii_case(pattern_host) {
+            return false;
+        }
+        eq_or_deeper(repo_path, pattern_path)
+    } else if repo_host.is_empty() {
+        eq_or_suffix_boundary(repo_path, norm_pattern)
+    } else {
+        eq_or_suffix_boundary(repo_path, norm_pattern)
+            || eq_or_suffix_boundary(norm_repo, norm_pattern)
+    }
 }
 
 /// Suffix appended to a non-registry dependency finding that
@@ -3968,6 +4017,18 @@ mod tests {
             "org/app"
         ));
         assert!(is_repo_allowed("https://github.com/org/app", "org/app"));
+        assert!(is_repo_allowed(
+            "http://github.com/org/app",
+            "github.com/org/app"
+        ));
+        assert!(is_repo_allowed(
+            "ssh://git@github.com/org/app.git",
+            "github.com/org/app"
+        ));
+        assert!(is_repo_allowed(
+            "https://github.com/org/app/subdir",
+            "github.com/org/app"
+        ));
 
         // Reject prefix / suffix / substring spoofing
         assert!(!is_repo_allowed(
@@ -3980,6 +4041,10 @@ mod tests {
         ));
         assert!(!is_repo_allowed(
             "https://github.com/attacker/org/app",
+            "github.com/org/app"
+        ));
+        assert!(!is_repo_allowed(
+            "https://evil.com/github.com/org/app",
             "github.com/org/app"
         ));
     }

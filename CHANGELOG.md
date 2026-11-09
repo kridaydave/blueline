@@ -53,6 +53,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 - **Gate four integration tests on Unix so the cross-platform test matrix passes on Windows.** `recall_export_osv_refuses_symlink_out`, `install_delegates_to_npm_with_ignore_scripts`, `shim_installs_gates_and_uninstalls` and `shim_fails_closed_when_the_baked_blueline_binary_is_missing` either create or execute on-disk `#!/bin/sh` scripts / symlinks that Windows cannot create or exec, so they now run only on Unix like the other platform-specific tests in the suite.
 
+- **Provenance `allowed_repositories` no longer accepts a spoofed host prefix.**
+  `is_repo_allowed` required only that the normalized repository ended with the
+  allowed pattern at a `/` or `:` boundary, so `evil.com/github.com/org/app`
+  satisfied `github.com/org/app`. Host-qualified patterns now require host
+  equality before path matching; path-only patterns keep boundary matching
+  (`heuristic::tests::enforces_repository_boundary_matching`).
+
 - **rustls-webpki bumped to 0.103.16 and webpki-roots to 1.0.10**, clearing
   RUSTSEC-2026-0382 and RUSTSEC-2026-0381 (distrusted emSign intermediates;
   CVE-2026-111943). The fix ships the 8 `.spki.der` key blobs that motivated
