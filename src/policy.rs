@@ -182,6 +182,7 @@ impl Policy {
             )));
         }
 
+        self.validate_glob_patterns()?;
         self.reject_unimplemented_keys()?;
 
         Ok(())
@@ -196,6 +197,24 @@ impl Policy {
     /// than a rejected one, because the operator has no way to notice. Erroring
     /// here is the only point where the key is still visible; once the field is
     /// gone, serde would drop it without a word.
+    fn validate_glob_patterns(&self) -> Result<(), BluelineError> {
+        for (i, rule) in self.blocklist.packages.iter().enumerate() {
+            validate_glob_pattern(&rule.pattern, &format!("blocklist.packages[{i}]"))?;
+        }
+        for (i, rule) in self.allowlist.packages.iter().enumerate() {
+            for (j, pattern) in rule.allowed_new_binary_paths.iter().enumerate() {
+                validate_glob_pattern(
+                    pattern,
+                    &format!(
+                        "allowlist.packages[{i}] (`{}`) allowed_new_binary_paths[{j}]",
+                        rule.name
+                    ),
+                )?;
+            }
+        }
+        Ok(())
+    }
+
     fn reject_unimplemented_keys(&self) -> Result<(), BluelineError> {
         // `require_signatures` gates on `registry_signature_present`, which is
         // built from whether `dist.signatures` is a non-empty array. Nothing
@@ -616,6 +635,30 @@ where
     Ok(raw.into_iter().map(PackageBlockRule::from).collect())
 }
 
+fn validate_glob_pattern(pattern: &str, context: &str) -> Result<(), BluelineError> {
+    if !pattern.contains('*') {
+        return Ok(());
+    }
+    if pattern == "*" {
+        return Ok(());
+    }
+    if pattern.starts_with('*') && pattern.ends_with('*') {
+        if pattern.matches('*').count() == 2 {
+            return Ok(());
+        }
+    } else if pattern.ends_with('*') {
+        if pattern.matches('*').count() == 1 {
+            return Ok(());
+        }
+    } else if pattern.starts_with('*') && pattern.matches('*').count() == 1 {
+        return Ok(());
+    }
+    Err(BluelineError::Policy(format!(
+        "{context} pattern `{pattern}` uses an unsupported glob shape; \
+         supported forms are: exact (`name`), `prefix*`, `*suffix`, `*middle*`, and `*`"
+    )))
+}
+
 /// Minimal, memory-safe wildcard pattern matching (`*` support).
 fn glob_match(pattern: &str, text: &str) -> bool {
     if pattern == "*" {
@@ -1026,7 +1069,8 @@ name = "other-pkg"
             "src/data/distrusted/EMOVTLSCAG3B.spki.der"
         ));
         // The matcher is the blocklist's minimal one: a leading or trailing
-        // star, or an exact string. An interior star is not a wildcard.
+        // star, or an exact string. An interior star is not a wildcard (and a
+        // pattern written that way is refused at policy load).
         assert!(!policy.allows_new_binary("tls-crate", Ecosystem::Cargo, "src/eval/pin.der"));
         assert!(!policy.allows_new_binary(
             "other-pkg",
@@ -1179,5 +1223,51 @@ ecosystem = "rubygems"
         assert!(with_max_age(1).validate().is_ok());
         assert!(with_max_age(24 * 365).validate().is_ok());
         assert!(with_max_age(24 * 365 + 1).validate().is_err());
+    }
+
+    #[test]
+    fn blocklist_glob_interior_star_is_rejected_at_load() {
+        let toml_content = r#"
+[blocklist]
+packages = ["evil-*-pkg"]
+"#;
+        let err = Policy::from_toml_str(toml_content).unwrap_err().to_string();
+        assert!(
+            err.contains("evil-*-pkg"),
+            "error should name the offending pattern: {err}"
+        );
+    }
+
+    #[test]
+    fn supported_glob_shapes_still_load() {
+        let toml_content = r#"
+[blocklist]
+packages = ["evil-*", "*-pkg", "*", "*mid*", "evil-pkg"]
+"#;
+        Policy::from_toml_str(toml_content).unwrap();
+    }
+
+    #[test]
+    fn blocklist_prefix_glob_still_blocks() {
+        let toml_content = r#"
+[blocklist]
+packages = ["evil-*"]
+"#;
+        let policy = Policy::from_toml_str(toml_content).unwrap();
+        assert!(policy.is_package_blocked("evil-x-pkg", Ecosystem::Npm));
+    }
+
+    #[test]
+    fn allowed_new_binary_paths_rejects_unsupported_glob() {
+        let toml_content = r#"
+[[allowlist.packages]]
+name = "pkg"
+allowed_new_binary_paths = ["src/da*ta/*"]
+"#;
+        let err = Policy::from_toml_str(toml_content).unwrap_err().to_string();
+        assert!(
+            err.contains("src/da*ta/*"),
+            "error should name the offending pattern: {err}"
+        );
     }
 }

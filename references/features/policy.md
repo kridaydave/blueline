@@ -65,7 +65,10 @@ checked on `metadata.len()` (stat only — no re-check after read).
 
 Glob semantics (`glob_match`, hand-rolled, no library): `"*"` matches all;
 `"*mid*"` → `contains(mid)`; `"pre*"` → `starts_with`; `"*suf"` → `ends_with`;
-otherwise exact `==` (**case-sensitive**). No `?`, no `[...]`, no escaping.
+otherwise exact `==` (**case-sensitive**). No `?`, no `[...]`, no escaping. A
+pattern whose `*` placement `glob_match` cannot interpret as one of those forms
+(e.g. `evil-*-pkg`) is refused at policy load, naming the pattern and the
+supported shapes — a silently-ignored blocklist glob is a fail-open control.
 
 ## Gotchas
 - **`load_for_agent` silently ignores `BLUELINE_POLICY`.** It is
@@ -141,9 +144,10 @@ otherwise exact `==` (**case-sensitive**). No `?`, no `[...]`, no escaping.
   whole reason the key cannot load from a file.
 - **`recursion.child_block_band` compares with `>=`**, so lowering it to
   `MEDIUM` rolls up medium children (`child_block_band_policy_lowering_rolls_up_medium_children`).
-- **`glob_match("**")` is `true`** (`contains("")`), and `a*b*c` degrades to an
-  `a*` prefix match. Replacing this with `globset`/`glob` silently changes
-  blocking semantics.
+- **`glob_match("**")` is `true`** (`contains("")`). A pattern like `a*b*c`
+  (interior/multiple stars outside the supported forms) is now refused at load
+  rather than degrading to an unintended match. Replacing this with
+  `globset`/`glob` silently changes blocking semantics.
 - **`require_sandbox` lives under `[policy]`, and `[general]` is now refused
   instead of silently doing nothing.** It used to load cleanly, be dropped, and
   leave the flag false — an operator who set it expecting fail-closed refusals
