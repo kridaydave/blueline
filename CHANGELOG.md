@@ -60,6 +60,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   equality before path matching; path-only patterns keep boundary matching
   (`heuristic::tests::enforces_repository_boundary_matching`).
 
+- **The pip install gate now denies dangerous source flags anywhere on the line.**
+  `pip_non_registry_shape` scanned only after `install`/`i`, so
+  `pip --index-url=… install x` and `pip -r reqs.txt install x` bypassed the
+  hard deny while the same flags after `install` were blocked. The dangerous
+  flag list is now matched position-independently for pip install invocations
+  (`install_ref::tests::pip_gate_denies_dangerous_flags_before_install`,
+  `install_ref::tests::gate_hard_denies_pip_non_registry_shapes`).
+
 - **rustls-webpki bumped to 0.103.16 and webpki-roots to 1.0.10**, clearing
   RUSTSEC-2026-0382 and RUSTSEC-2026-0381 (distrusted emSign intermediates;
   CVE-2026-111943). The fix ships the 8 `.spki.der` key blobs that motivated

