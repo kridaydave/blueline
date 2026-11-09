@@ -1,14 +1,15 @@
 use std::collections::BTreeMap;
 use std::fs;
+use std::io::Read;
 use std::io::Write;
 use std::path::Path;
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use serde::{Deserialize, Serialize};
 
-use crate::lockfile::{compute_delta_from_maps, compute_lockfile_delta};
+use crate::lockfile::{MAX_CARGO_LOCK_BYTES, compute_delta_from_maps, compute_lockfile_delta};
 use crate::policy::Policy;
 use crate::registry::Ecosystem;
 use crate::registry::aur::validate_aur_name;
@@ -151,17 +152,7 @@ pub fn run(
     let policy = Policy::load_or_default(policy_path)?;
     let store = BaselineStore::open()?;
 
-    let head_content = fs::read_to_string(lockfile_path).map_err(|e| {
-        let hint = if e.kind() == std::io::ErrorKind::NotFound {
-            " (use `--lockfile <path>` to specify a different path)"
-        } else {
-            ""
-        };
-        anyhow::anyhow!(
-            "failed to read head lockfile at `{}`: {e}{hint}",
-            lockfile_path.display()
-        )
-    })?;
+    let head_content = read_head_lockfile(lockfile_path)?;
 
     let is_cargo = is_cargo_lockfile(ecosystem, lockfile_path);
     let is_pypi = is_pypi_lockfile(ecosystem, lockfile_path);
@@ -584,6 +575,44 @@ fn evaluate_aur_ci_diff(
     })
 }
 
+/// Read a lockfile source bounded at the parsers' 10 MiB cap. Both the head
+/// file and the `git show` base stream go through here so an oversize source
+/// fails closed at the cap instead of being buffered whole.
+fn read_capped_lockfile<R: Read>(reader: R, source: &str) -> anyhow::Result<Vec<u8>> {
+    let mut buf = Vec::new();
+    reader
+        .take(MAX_CARGO_LOCK_BYTES as u64 + 1)
+        .read_to_end(&mut buf)
+        .map_err(|e| anyhow::anyhow!("failed to read {source}: {e}"))?;
+    if buf.len() > MAX_CARGO_LOCK_BYTES {
+        anyhow::bail!(
+            "{source} exceeds {MAX_CARGO_LOCK_BYTES} bytes; split the change to review it"
+        );
+    }
+    Ok(buf)
+}
+
+fn read_head_lockfile(path: &Path) -> anyhow::Result<String> {
+    let file = fs::File::open(path).map_err(|e| {
+        let hint = if e.kind() == std::io::ErrorKind::NotFound {
+            " (use `--lockfile <path>` to specify a different path)"
+        } else {
+            ""
+        };
+        anyhow::anyhow!(
+            "failed to read head lockfile at `{}`: {e}{hint}",
+            path.display()
+        )
+    })?;
+    let bytes = read_capped_lockfile(file, &format!("head lockfile at `{}`", path.display()))?;
+    String::from_utf8(bytes).map_err(|e| {
+        anyhow::anyhow!(
+            "head lockfile at `{}` is not valid UTF-8: {e}",
+            path.display()
+        )
+    })
+}
+
 fn extract_base_lockfile(
     base_ref: &str,
     lockfile_path: &Path,
@@ -597,13 +626,38 @@ fn extract_base_lockfile(
     }
 
     let spec = format!("{trimmed_ref}:{}", lockfile_path.display());
-    let output = Command::new("git")
+    let mut child = Command::new("git")
         .args(["show", &spec])
-        .output()
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
         .map_err(|e| anyhow::anyhow!("failed to execute git show `{spec}`: {e}"))?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| anyhow::anyhow!("git show `{spec}` produced no stdout pipe"))?;
+    let stderr_pipe = child.stderr.take();
+    let source = format!("base lockfile from git show `{spec}`");
+    let stdout_bytes = match read_capped_lockfile(stdout, &source) {
+        Ok(b) => b,
+        Err(e) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(e);
+        }
+    };
+    let mut stderr_bytes = Vec::new();
+    if let Some(pipe) = stderr_pipe {
+        pipe.take(1024 * 1024 + 1)
+            .read_to_end(&mut stderr_bytes)
+            .map_err(|e| anyhow::anyhow!("failed to read git show `{spec}` stderr: {e}"))?;
+    }
+    let status = child
+        .wait()
+        .map_err(|e| anyhow::anyhow!("failed to wait for git show `{spec}`: {e}"))?;
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
+    if !status.success() {
+        let stderr = String::from_utf8_lossy(&stderr_bytes);
         if is_missing_base_error(&stderr) {
             if is_cargo {
                 return Ok("version = 4\n".to_string());
@@ -616,7 +670,7 @@ fn extract_base_lockfile(
         anyhow::bail!("git show `{spec}` failed: {stderr}");
     }
 
-    String::from_utf8(output.stdout)
+    String::from_utf8(stdout_bytes)
         .map_err(|e| anyhow::anyhow!("base lockfile from git is not valid UTF-8: {e}"))
 }
 
@@ -924,6 +978,46 @@ mod tests {
             extract_base_lockfile("  ", Path::new("package-lock.json"), false, false, false)
                 .unwrap_err();
         assert!(err_empty.to_string().contains("or be empty"));
+    }
+
+    #[test]
+    fn head_lockfile_over_cap_is_refused_with_split_hint() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("package-lock.json");
+        let body = vec![b'a'; MAX_CARGO_LOCK_BYTES + 1];
+        fs::write(&path, &body).unwrap();
+        let err = read_head_lockfile(&path).expect_err("an oversize head must fail closed");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("exceeds") && msg.contains("split the change"),
+            "unexpected error: {msg}"
+        );
+        // Exactly at the cap reads.
+        let at_cap = vec![b'a'; MAX_CARGO_LOCK_BYTES];
+        fs::write(&path, &at_cap).unwrap();
+        assert_eq!(
+            read_head_lockfile(&path).unwrap().len(),
+            MAX_CARGO_LOCK_BYTES
+        );
+    }
+
+    #[test]
+    fn base_reader_bound_refuses_oversize_stdout_and_allows_at_cap() {
+        let over = vec![b'a'; MAX_CARGO_LOCK_BYTES + 1];
+        let err = read_capped_lockfile(std::io::Cursor::new(over), "base lockfile")
+            .expect_err("an oversize base stream must fail closed");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("exceeds") && msg.contains("split the change"),
+            "unexpected error: {msg}"
+        );
+        let at_cap = vec![b'b'; MAX_CARGO_LOCK_BYTES];
+        assert_eq!(
+            read_capped_lockfile(std::io::Cursor::new(at_cap), "base lockfile")
+                .unwrap()
+                .len(),
+            MAX_CARGO_LOCK_BYTES
+        );
     }
 
     #[test]

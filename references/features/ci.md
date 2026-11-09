@@ -49,11 +49,18 @@ Policy knobs: `[ci] fail_on = "high"`, `max_evaluations = 100`,
 
 ## Gotchas
 - **Base ref comes from `git show`, not `git diff`.** Exactly
-  `Command::new("git").args(["show", "{ref}:{lockfile_path}"])`. The only
+  `Command::new("git").args(["show", "{ref}:{lockfile_path}"])` with piped
+  stdout read through `take(cap + 1)`. The only
   injection surface is a leading `-`, rejected with
   `if trimmed_ref.starts_with('-') || trimmed_ref.is_empty()` — note the error
   message interpolates the *untrimmed* ref. `rejects_flag_like_base_refs` covers
   `--output=/tmp/pwn`, `"  --evil"`, `"  "`.
+- **Head and base lockfiles share the parsers' 10 MiB cap at the read.**
+  `read_capped_lockfile` bounds both `read_head_lockfile` and the base stdout
+  stream at `MAX_CARGO_LOCK_BYTES`; an oversize source fails with a
+  `split the change` hint before parsing. `head_lockfile_over_cap_is_refused_with_split_hint`
+  and `base_reader_bound_refuses_oversize_stdout_and_allows_at_cap` pin the
+  boundary (exactly-at-cap reads, cap+1 fails).
 - **`BASE_REF` is not read by the Rust code.** It exists only in
   `.github/workflows/ci.yml`; the CLI default is `origin/main`.
 - **A *missing* base is an empty baseline, not an error.** `is_missing_base_error`

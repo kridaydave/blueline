@@ -273,7 +273,7 @@ fn normalize_node_modules_path(path: &str) -> String {
         .to_string()
 }
 
-const MAX_CARGO_LOCK_BYTES: usize = 10 * 1024 * 1024;
+pub(crate) const MAX_CARGO_LOCK_BYTES: usize = 10 * 1024 * 1024;
 
 #[derive(Deserialize)]
 struct CargoLockFile {

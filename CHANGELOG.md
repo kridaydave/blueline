@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- **CI lockfile reads are now capped at 10 MiB before parsing.** The head file
+  (`read_to_string`) and the `git show` base stream (`Command::output`) were
+  buffered whole; both now read through a bounded reader at the parsers' cap
+  and an oversize source fails with a `split the change` hint.
+
 - **A missing shim directory is now propagated instead of replaced with a dummy
   path.** `resolve_package_manager` discarded the error with `unwrap_or("/nonexistent")`,
   losing the shim-dir exclusion; it now fails closed via `shim_dir_or_err`.
