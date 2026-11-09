@@ -84,8 +84,12 @@ Rule wiring (`heuristic.rs`):
   (`provenance::tests::provenance_cache_hit_with_different_digest_reverifies_npm`,
   `provenance::tests::stale_provenance_cache_row_reverifies_npm`,
   `provenance::tests::provenance_cache_happy_hit_still_works_npm`).
-- **Cargo and AUR pass `None` for provenance** in `review.rs`, so
-  `trust_sources.provenance` is absent for those ecosystems.
+- **Cargo and AUR pass `None` for provenance** in `review.rs`. When provenance
+  controls are active (`require_provenance`, or non-empty
+  `allowed_repositories`/`allowed_builders`) and no provenance data is supplied,
+  the heuristic emits `P03_PROVENANCE_UNEVALUABLE` (LOW, non-blocking) naming
+  the lane; with no controls active, nothing is emitted. `trust_sources.provenance`
+  remains absent for those ecosystems.
 - **`[provenance] allowed_builders` is a dead knob** — never read anywhere.
   Only `allowed_repositories` is consulted, via `P03_UNAUTHORIZED_BUILD_REPO`.
 - **`is_repo_allowed` requires host equality for host-qualified patterns** and

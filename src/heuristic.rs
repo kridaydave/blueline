@@ -170,6 +170,27 @@ pub fn evaluate_with_trust(
 
     if let Some(prov_rep) = provenance {
         findings.extend(provenance_findings(prov_rep, policy));
+    } else {
+        let provenance_required =
+            policy.policy.require_provenance || policy.provenance.require_provenance;
+        let provenance_constraints_active = provenance_required
+            || !policy.provenance.allowed_repositories.is_empty()
+            || !policy.provenance.allowed_builders.is_empty();
+        if provenance_constraints_active {
+            let lane = ecosystem.key();
+            findings.push(Finding {
+                rule_id: "P03_PROVENANCE_UNEVALUABLE".into(),
+                severity: VerdictBand::Low,
+                title: format!("Provenance policy could not be applied on the {lane} lane"),
+                description: format!(
+                    "blueline.toml enables provenance controls (require_provenance, \
+                     allowed_repositories, or allowed_builders), but the {lane} lane does \
+                     not supply provenance data to evaluate them. This is disclosed and the \
+                     verdict is not blocked by this finding; treat the release as unreviewed by \
+                     those controls."
+                ),
+            });
+        }
     }
 
     // R01: Lifecycle scripts
@@ -3055,6 +3076,146 @@ mod tests {
         assert!(
             findings.is_empty(),
             "an unrequested check must not gate anything: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn cargo_provenance_controls_emit_low_disclosure_when_unevaluable() {
+        let mut policy = Policy::default();
+        policy.policy.require_provenance = true;
+        let verdict = evaluate_with_trust(
+            "serde",
+            Ecosystem::Cargo,
+            "verified (sha256)",
+            &Delta::default(),
+            false,
+            false,
+            None,
+            false,
+            None,
+            false,
+            None,
+            &policy,
+            None,
+            None,
+        );
+        let disclosure = verdict
+            .findings
+            .iter()
+            .find(|f| f.rule_id == "P03_PROVENANCE_UNEVALUABLE")
+            .unwrap_or_else(|| panic!("expected unevaluable disclosure: {:?}", verdict.findings));
+        assert_eq!(disclosure.severity, VerdictBand::Low);
+        assert!(
+            disclosure.title.contains("cargo"),
+            "disclosure should name the lane: {}",
+            disclosure.title
+        );
+        assert!(
+            verdict.band < VerdictBand::Block,
+            "unevaluable provenance on cargo must not block: {:?}",
+            verdict.band
+        );
+    }
+
+    #[test]
+    fn cargo_without_provenance_controls_emits_no_disclosure() {
+        let verdict = evaluate_with_trust(
+            "serde",
+            Ecosystem::Cargo,
+            "verified (sha256)",
+            &Delta::default(),
+            false,
+            false,
+            None,
+            false,
+            None,
+            false,
+            None,
+            &Policy::default(),
+            None,
+            None,
+        );
+        assert!(
+            verdict
+                .findings
+                .iter()
+                .all(|f| f.rule_id != "P03_PROVENANCE_UNEVALUABLE"),
+            "no controls active means no disclosure: {:?}",
+            verdict.findings
+        );
+    }
+
+    #[test]
+    fn aur_allowed_repositories_control_emits_low_disclosure_when_unevaluable() {
+        let mut policy = Policy::default();
+        policy.provenance.allowed_repositories = vec!["github.com/example/repo".into()];
+        let verdict = evaluate_with_trust(
+            "yay",
+            Ecosystem::Aur,
+            "verified (sha256)",
+            &Delta::default(),
+            false,
+            false,
+            None,
+            false,
+            None,
+            false,
+            None,
+            &policy,
+            None,
+            None,
+        );
+        let disclosure = verdict
+            .findings
+            .iter()
+            .find(|f| f.rule_id == "P03_PROVENANCE_UNEVALUABLE")
+            .unwrap_or_else(|| panic!("expected unevaluable disclosure: {:?}", verdict.findings));
+        assert_eq!(disclosure.severity, VerdictBand::Low);
+        assert!(
+            verdict.band < VerdictBand::Block,
+            "unevaluable provenance on aur must not block: {:?}",
+            verdict.band
+        );
+    }
+
+    #[test]
+    fn npm_with_provenance_present_has_no_unevaluable_disclosure() {
+        let mut policy = Policy::default();
+        policy.policy.require_provenance = true;
+        let report = crate::provenance::ProvenanceReport {
+            status: crate::provenance::ProvenanceStatus::CryptographicallyVerified,
+            slsa_level: 1,
+            builder_id: Some("https://github.com/actions/runner".into()),
+            source_repo: Some("git+https://github.com/acme/pkg".into()),
+            commit_sha: Some("a".repeat(40)),
+            workflow_path: Some(".github/workflows/release.yml".into()),
+            registry_signature_present: true,
+            registry_signature_key_id: None,
+            message: None,
+        };
+        let verdict = evaluate_with_trust(
+            "pkg",
+            Ecosystem::Npm,
+            "verified (sha512)",
+            &Delta::default(),
+            false,
+            false,
+            None,
+            false,
+            None,
+            false,
+            None,
+            &policy,
+            None,
+            Some(&report),
+        );
+        assert!(
+            verdict
+                .findings
+                .iter()
+                .all(|f| f.rule_id != "P03_PROVENANCE_UNEVALUABLE"),
+            "npm with provenance present must not emit unevaluable: {:?}",
+            verdict.findings
         );
     }
 

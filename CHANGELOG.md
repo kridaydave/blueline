@@ -63,6 +63,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   `policy::tests::allowed_new_binary_paths_rejects_unsupported_glob`).
 >>>>>>> 54a85fb (Reject unsupported glob patterns in policy at load)
 
+- **Active provenance controls no longer stay inert on Cargo and AUR lanes.**
+  When `require_provenance`, `allowed_repositories`, or `allowed_builders` is
+  active but the lane supplies no provenance data, the heuristic emits
+  `P03_PROVENANCE_UNEVALUABLE` (LOW, non-blocking) naming the lane instead of
+  silently skipping evaluation; with no controls active, nothing is emitted
+  (`heuristic::tests::cargo_provenance_controls_emit_low_disclosure_when_unevaluable`,
+  `heuristic::tests::cargo_without_provenance_controls_emits_no_disclosure`,
+  `heuristic::tests::aur_allowed_repositories_control_emits_low_disclosure_when_unevaluable`).
+
 - **Duplicate `requirements.txt` pins for one canonical package no longer overwrite.**
   Differing duplicates (version or integrity) return `LockfileError::InvalidData`
   naming the package, refusing to review a requirements file whose package graph
