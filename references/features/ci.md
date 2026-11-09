@@ -101,6 +101,14 @@ Policy knobs: `[ci] fail_on = "high"`, `max_evaluations = 100`,
   `max_band` entirely ("✅ **No new or upgraded packages detected in lockfile
   diff.**"). A gate that greps the step summary for `PASSED` finds nothing on an
   empty delta.
+- **Non-registry Cargo deps are surfaced, not silently skipped.** Added/upgraded
+  candidates whose `source` does not start with `registry+` (git, path, and
+  workspace members with no source) are collected into `CiReport.skipped`
+  (`CiSkippedItem { name, version, reason }`, additive with `#[serde(default)]`)
+  and rendered as `Skipped (non-registry): N` plus one line per entry in both
+  text and markdown summaries, only when non-empty. Evaluation scope is
+  unchanged. `cargo_git_dep_is_surfaced_as_skipped_non_registry` and
+  `cargo_registry_only_lockfile_has_no_skipped_line` pin both arms.
 - **Markdown and text escape differently, and both are mandatory**: markdown
   does `sanitize_terminal` then `|`→`\|` and `\n`→`<br/>`; text uses
   `sanitize_single_line`. `escapes_markdown_cells_strips_terminal_escapes` asserts

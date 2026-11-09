@@ -37,6 +37,13 @@ pub struct CiReviewItem {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
+pub struct CiSkippedItem {
+    pub name: String,
+    pub version: String,
+    pub reason: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
 pub struct CiReport {
     pub base_ref: String,
     pub lockfile_path: String,
@@ -46,6 +53,8 @@ pub struct CiReport {
     pub max_band: VerdictBand,
     pub passed: bool,
     pub items: Vec<CiReviewItem>,
+    #[serde(default)]
+    pub skipped: Vec<CiSkippedItem>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -274,6 +283,7 @@ pub fn evaluate_lockfile_diff(
     // is fixed here, before any review starts, and never depends on which
     // review happens to finish first.
     let mut candidates: Vec<Candidate> = Vec::new();
+    let mut skipped: Vec<CiSkippedItem> = Vec::new();
     for (name, old_version, new_version, is_dev, resolved) in delta
         .added
         .iter()
@@ -297,6 +307,14 @@ pub fn evaluate_lockfile_diff(
         if ctx.ecosystem == crate::registry::Ecosystem::Cargo
             && !resolved.is_some_and(|r| r.starts_with("registry+"))
         {
+            skipped.push(CiSkippedItem {
+                name: name.to_string(),
+                version: new_version.to_string(),
+                reason: match resolved {
+                    Some(r) => format!("non-registry source: {r}"),
+                    None => "no registry source".to_string(),
+                },
+            });
             continue;
         }
 
@@ -330,6 +348,7 @@ pub fn evaluate_lockfile_diff(
         max_band,
         passed,
         items,
+        skipped,
     })
 }
 
@@ -572,6 +591,7 @@ fn evaluate_aur_ci_diff(
         max_band,
         passed,
         items,
+        skipped: Vec::new(),
     })
 }
 
@@ -703,6 +723,22 @@ pub fn render_markdown_summary(report: &CiReport) -> String {
         report.removed_count
     ));
 
+    if !report.skipped.is_empty() {
+        out.push_str(&format!(
+            "**Skipped (non-registry):** {}\n\n",
+            report.skipped.len()
+        ));
+        for s in &report.skipped {
+            out.push_str(&format!(
+                "- `{}` `{}` ({})\n",
+                escape_markdown_cell(&s.name),
+                escape_markdown_cell(&s.version),
+                escape_markdown_cell(&s.reason)
+            ));
+        }
+        out.push('\n');
+    }
+
     if report.items.is_empty() {
         out.push_str("✅ **No new or upgraded packages detected in lockfile diff.**\n");
         return out;
@@ -767,6 +803,20 @@ pub fn render_text_summary_to_string(report: &CiReport) -> String {
     out.push_str(&format!("Evaluated:         {}\n", report.total_evaluated));
     out.push_str(&format!("Unchanged:         {}\n", report.unchanged_count));
     out.push_str(&format!("Removed:           {}\n", report.removed_count));
+    if !report.skipped.is_empty() {
+        out.push_str(&format!(
+            "Skipped (non-registry): {}\n",
+            report.skipped.len()
+        ));
+        for s in &report.skipped {
+            out.push_str(&format!(
+                "  - {} {} ({})\n",
+                sanitize_single_line(&s.name),
+                sanitize_single_line(&s.version),
+                sanitize_single_line(&s.reason)
+            ));
+        }
+    }
     out.push_str(&format!("Max Risk Band:     {}\n", report.max_band));
     out.push_str(&format!(
         "Status:            {}\n",
@@ -1060,6 +1110,7 @@ mod tests {
                     recursive: Vec::new(),
                 },
             }],
+            skipped: vec![],
         };
 
         let md = render_markdown_summary(&report);
@@ -1108,6 +1159,7 @@ mod tests {
                     recursive: Vec::new(),
                 },
             }],
+            skipped: vec![],
         };
         let md = render_markdown_summary(&report);
         assert!(!md.contains('\x1b'), "markdown must strip terminal escapes");
@@ -1150,6 +1202,7 @@ mod tests {
                     recursive: Vec::new(),
                 },
             }],
+            skipped: vec![],
         };
 
         let md = render_markdown_summary(&report);
@@ -1169,6 +1222,7 @@ mod tests {
             max_band: VerdictBand::Low,
             passed: true,
             items: vec![],
+            skipped: vec![],
         };
         let text = render_text_summary_to_string(&report);
         assert!(text.contains("BLUELINE CI REVIEW SUMMARY"));
@@ -1216,6 +1270,7 @@ mod tests {
                     recursive: Vec::new(),
                 },
             }],
+            skipped: vec![],
         };
         let text = render_text_summary_to_string(&report);
         assert!(
@@ -1268,6 +1323,7 @@ mod tests {
                     recursive: Vec::new(),
                 },
             }],
+            skipped: vec![],
         };
         let text = render_text_summary_to_string(&report);
         assert!(
@@ -1609,6 +1665,104 @@ source = "path+file:///some/local/path"
         let report = evaluate_lockfile_diff(base_cargo, head_cargo, &ctx, &store, &policy).unwrap();
         assert_eq!(report.items.len(), 0);
         assert!(report.passed);
+    }
+
+    #[test]
+    fn cargo_git_dep_is_surfaced_as_skipped_non_registry() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = BaselineStore::open_at(&dir.path().join("blueline.db")).unwrap();
+        let policy = Policy::default();
+        let bases_tmp = bases_index();
+        let ctx = CiContext {
+            base_ref: "origin/main",
+            lockfile_path: "Cargo.lock",
+            bases: &bases_tmp,
+            fail_on: None,
+            ecosystem: crate::registry::Ecosystem::Cargo,
+        };
+
+        let base_cargo = "version = 4\n";
+
+        let head_cargo = r#"
+version = 4
+
+[[package]]
+name = "evil-git"
+version = "1.2.3"
+source = "git+https://github.com/evil/example.git#0123456789abcdef0123456789abcdef01234567"
+
+[[package]]
+name = "path-dep"
+version = "0.3.0"
+source = "path+file:///opt/vendor/path-dep"
+"#;
+
+        let report = evaluate_lockfile_diff(base_cargo, head_cargo, &ctx, &store, &policy).unwrap();
+        assert_eq!(report.items.len(), 0);
+        assert!(report.passed);
+        assert_eq!(report.skipped.len(), 2);
+        let git = report
+            .skipped
+            .iter()
+            .find(|s| s.name == "evil-git")
+            .unwrap_or_else(|| panic!("git dep must be surfaced as skipped"));
+        assert_eq!(git.version, "1.2.3");
+        assert!(git.reason.contains("git+https"), "reason: {}", git.reason);
+        let path = report
+            .skipped
+            .iter()
+            .find(|s| s.name == "path-dep")
+            .unwrap_or_else(|| panic!("path dep must be surfaced as skipped"));
+        assert_eq!(path.version, "0.3.0");
+        assert!(path.reason.contains("path+file"), "reason: {}", path.reason);
+
+        let text = render_text_summary_to_string(&report);
+        assert!(text.contains("Skipped (non-registry): 2"), "{text}");
+        assert!(text.contains("evil-git"), "{text}");
+        let md = render_markdown_summary(&report);
+        assert!(md.contains("Skipped (non-registry)"), "{md}");
+        assert!(md.contains("evil-git"), "{md}");
+        let json = serde_json::to_string(&report).unwrap();
+        assert!(json.contains("evil-git"), "{json}");
+    }
+
+    #[test]
+    fn cargo_registry_only_lockfile_has_no_skipped_line() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = BaselineStore::open_at(&dir.path().join("blueline.db")).unwrap();
+        let policy = Policy::default();
+        let bases_tmp = bases_index();
+        let ctx = CiContext {
+            base_ref: "origin/main",
+            lockfile_path: "Cargo.lock",
+            bases: &bases_tmp,
+            fail_on: None,
+            ecosystem: crate::registry::Ecosystem::Cargo,
+        };
+
+        let both = r#"
+version = 4
+
+[[package]]
+name = "serde"
+version = "1.0.210"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+
+[[package]]
+name = "anyhow"
+version = "1.0.95"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB"
+"#;
+
+        let report = evaluate_lockfile_diff(both, both, &ctx, &store, &policy).unwrap();
+        assert!(report.skipped.is_empty());
+        assert_eq!(report.total_evaluated, 0);
+        let text = render_text_summary_to_string(&report);
+        assert!(!text.contains("Skipped"), "{text}");
+        let md = render_markdown_summary(&report);
+        assert!(!md.contains("Skipped"), "{md}");
     }
 
     #[test]

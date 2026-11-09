@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- **Non-registry Cargo dependency additions are now surfaced instead of silently skipped.** The CI lane `continue`d past any added/upgraded candidate whose `source` did not start with `registry+`, so a git or path dependency passed with no trace. Such candidates are now collected into the additive `CiReport.skipped` field (`name`, `version`, `reason`) and rendered as `Skipped (non-registry): N` plus one line per entry in both text and markdown summaries, only when non-empty. What gets evaluated is unchanged.
+
 - **CI lockfile reads are now capped at 10 MiB before parsing.** The head file
   (`read_to_string`) and the `git show` base stream (`Command::output`) were
   buffered whole; both now read through a bounded reader at the parsers' cap
