@@ -104,6 +104,7 @@ pub fn parse_lockfile_packages(
 
     if let Some(raw_packages) = raw.packages {
         // v2 / v3 format
+        let mut seen_raw_paths: BTreeMap<String, String> = BTreeMap::new();
         for (path, pkg) in raw_packages {
             // Skip root package represented by empty string or "."
             if path.is_empty() || path == "." {
@@ -191,6 +192,23 @@ pub fn parse_lockfile_packages(
 
             // Key by normalized path in node_modules tree to handle nested deps
             let normalized_key = normalize_node_modules_path(&path);
+            if let Some(prev_raw) = seen_raw_paths.get(&normalized_key) {
+                let prev = packages.get(&normalized_key).ok_or_else(|| {
+                    LockfileError::InvalidData(format!(
+                        "internal lockfile state missing entry for `{normalized_key}`"
+                    ))
+                })?;
+                if prev != &entry {
+                    return Err(LockfileError::InvalidData(format!(
+                        "`{prev_raw}` and `{path}` normalize to the same package path \
+                         (`{normalized_key}`) but describe different entries; refusing to \
+                         review a lockfile whose package graph is ambiguous"
+                    )));
+                }
+                // Byte-identical duplicates normalize to one key; keep the first.
+                continue;
+            }
+            seen_raw_paths.insert(normalized_key.clone(), path.clone());
             packages.insert(normalized_key, entry);
         }
     } else if let Some(raw_dependencies) = raw.dependencies {
@@ -975,6 +993,58 @@ mod tests {
             format!("{err}").contains("node_modules/"),
             "the refusal must name the entry it refused: {err}"
         );
+    }
+
+    #[test]
+    fn npm_normalized_path_collision_with_differing_entries_is_refused() {
+        let json = r#"{
+            "lockfileVersion": 3,
+            "packages": {
+                "node_modules/x": { "version": "1.0.0", "integrity": "sha512-a" },
+                "./node_modules/x": { "version": "2.0.0", "integrity": "sha512-b" }
+            }
+        }"#;
+        let err = parse_lockfile_packages(json).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("./node_modules/x") && msg.contains("node_modules/x"),
+            "error should name both raw paths, got: {msg}"
+        );
+        assert!(
+            msg.contains("ambigu")
+                || msg.contains("differ")
+                || msg.contains("collision")
+                || msg.contains("conflict"),
+            "error should explain the collision, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn npm_normalized_single_entry_unaffected_by_collision_check() {
+        let json = r#"{
+            "lockfileVersion": 3,
+            "packages": {
+                "": { "name": "app", "version": "1.0.0" },
+                "./node_modules/x": { "version": "1.0.0", "integrity": "sha512-a" }
+            }
+        }"#;
+        let pkgs = parse_lockfile_packages(json).unwrap();
+        assert!(pkgs.contains_key("node_modules/x"));
+        assert_eq!(pkgs.get("node_modules/x").unwrap().version, "1.0.0");
+    }
+
+    #[test]
+    fn npm_normalized_path_identical_duplicates_dedupe_silently() {
+        let json = r#"{
+            "lockfileVersion": 3,
+            "packages": {
+                "node_modules/x": { "version": "1.0.0", "integrity": "sha512-a" },
+                "./node_modules/x": { "version": "1.0.0", "integrity": "sha512-a" }
+            }
+        }"#;
+        let pkgs = parse_lockfile_packages(json).unwrap();
+        assert_eq!(pkgs.len(), 1);
+        assert_eq!(pkgs.get("node_modules/x").unwrap().version, "1.0.0");
     }
 
     #[test]
