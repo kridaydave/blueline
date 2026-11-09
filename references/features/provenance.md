@@ -76,11 +76,14 @@ Rule wiring (`heuristic.rs`):
 - **A base64/JSON parse error on the PyPI endpoint is indistinguishable from
   "no attestation"** (`Missing`), except by the `"Provenance unverified: "`
   message prefix.
-- **The provenance cache has no TTL and no checksum in its key.** A cache hit
-  returns `Verified` without touching `expected_integrity` — so the same
-  `name@version` with a *different* tarball reads back the old `Verified` and
-  skips the digest check entirely. `verified_at` is stored and never compared.
-  This is the sharpest asymmetry with the advisory cache, which at least expires.
+- **The provenance cache is bound to the verified subject digest and expires.**
+  A cache hit is trusted only when its stored `subject_digest` matches the
+  artifact digest under review and the row has not expired (`expires_at` from
+  `verified_at + PROVENANCE_CACHE_TTL_SECS`, 7 days, in `store.rs`). A digest
+  mismatch or stale row is treated as a miss and re-verified
+  (`provenance::tests::provenance_cache_hit_with_different_digest_reverifies_npm`,
+  `provenance::tests::stale_provenance_cache_row_reverifies_npm`,
+  `provenance::tests::provenance_cache_happy_hit_still_works_npm`).
 - **Cargo and AUR pass `None` for provenance** in `review.rs`, so
   `trust_sources.provenance` is absent for those ecosystems.
 - **`[provenance] allowed_builders` is a dead knob** — never read anywhere.

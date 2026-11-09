@@ -68,6 +68,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   (`install_ref::tests::pip_gate_denies_dangerous_flags_before_install`,
   `install_ref::tests::gate_hard_denies_pip_non_registry_shapes`).
 
+- **Cached provenance is now bound to the verified subject digest and expires.**
+  A provenance cache hit for the same `ecosystem, package, version` reused the
+  cached attestation without checking the artifact digest or `verified_at`, so a
+  different digest or a stale answer could be trusted. Cache rows now store the
+  verified `subject_digest` and an `expires_at` (7 days, `PROVENANCE_CACHE_TTL_SECS`);
+  a digest mismatch or expired row is treated as a miss and re-verified. Existing
+  databases migrate in place with idempotent guarded `ALTER TABLE`s; `known_clean`
+  is unchanged
+  (`provenance::tests::provenance_cache_hit_with_different_digest_reverifies_npm`,
+  `provenance::tests::stale_provenance_cache_row_reverifies_npm`,
+  `provenance::tests::provenance_cache_happy_hit_still_works_npm`).
+
 - **rustls-webpki bumped to 0.103.16 and webpki-roots to 1.0.10**, clearing
   RUSTSEC-2026-0382 and RUSTSEC-2026-0381 (distrusted emSign intermediates;
   CVE-2026-111943). The fix ships the 8 `.spki.der` key blobs that motivated
