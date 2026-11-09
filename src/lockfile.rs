@@ -213,7 +213,7 @@ pub fn parse_lockfile_packages(
         }
     } else if let Some(raw_dependencies) = raw.dependencies {
         // v1 format
-        walk_v1_dependencies("", &raw_dependencies, &mut packages, 0);
+        walk_v1_dependencies("", &raw_dependencies, &mut packages, 0)?;
     } else {
         // Lockfile with neither packages nor dependencies (empty or invalid)
         if raw.lockfile_version.is_none() {
@@ -231,20 +231,31 @@ fn walk_v1_dependencies(
     deps: &BTreeMap<String, RawDependencyV1>,
     out: &mut BTreeMap<String, PackageEntry>,
     depth: usize,
-) {
+) -> Result<(), LockfileError> {
     if depth > MAX_LOCKFILE_RECURSION_DEPTH {
-        return;
+        let at = if prefix.is_empty() {
+            "the root dependency set".to_string()
+        } else {
+            format!("`{prefix}`")
+        };
+        return Err(LockfileError::InvalidData(format!(
+            "v1 dependency nesting exceeds maximum depth ({MAX_LOCKFILE_RECURSION_DEPTH}) at {at}; \
+             refusing to review a lockfile whose dependency graph is truncated"
+        )));
     }
 
     for (name, dep) in deps {
-        let Some(version) = &dep.version else {
-            continue;
-        };
-
         let path_key = if prefix.is_empty() {
             format!("node_modules/{name}")
         } else {
             format!("{prefix}/node_modules/{name}")
+        };
+
+        let Some(version) = &dep.version else {
+            return Err(LockfileError::InvalidData(format!(
+                "`{path_key}` declares no version; refusing to review a lockfile \
+                 with an entry that cannot be read"
+            )));
         };
 
         let entry = PackageEntry {
@@ -258,9 +269,10 @@ fn walk_v1_dependencies(
         out.insert(path_key.clone(), entry);
 
         if let Some(nested) = &dep.dependencies {
-            walk_v1_dependencies(&path_key, nested, out, depth + 1);
+            walk_v1_dependencies(&path_key, nested, out, depth + 1)?;
         }
     }
+    Ok(())
 }
 
 fn extract_package_name_from_path(path: &str) -> String {
@@ -1161,7 +1173,7 @@ mod tests {
     }
 
     #[test]
-    fn v1_recursion_depth_limit_enforced() {
+    fn v1_recursion_depth_overflow_is_refused() {
         // Build a deeply nested structure exceeding MAX_LOCKFILE_RECURSION_DEPTH (32)
         let mut curr = serde_json::json!({
             "version": "1.0.0"
@@ -1184,9 +1196,29 @@ mod tests {
         });
 
         let json = serde_json::to_string(&root).unwrap();
-        let pkgs = parse_lockfile_packages(&json).unwrap();
-        // Should parse up to the limit (33 levels including root: depth 0 to 32)
-        assert_eq!(pkgs.len(), MAX_LOCKFILE_RECURSION_DEPTH + 1);
+        let err = parse_lockfile_packages(&json).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("depth") || msg.contains("nesting") || msg.contains("truncat"),
+            "error should explain the depth overflow, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn v1_missing_version_is_refused() {
+        let json = r#"{
+            "lockfileVersion": 1,
+            "dependencies": {
+                "ok": { "version": "1.0.0" },
+                "broken": { "integrity": "sha512-x" }
+            }
+        }"#;
+        let err = parse_lockfile_packages(json).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("broken") && msg.contains("version"),
+            "error should name the path and missing version, got: {msg}"
+        );
     }
 
     #[test]

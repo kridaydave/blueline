@@ -53,6 +53,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 - **Gate four integration tests on Unix so the cross-platform test matrix passes on Windows.** `recall_export_osv_refuses_symlink_out`, `install_delegates_to_npm_with_ignore_scripts`, `shim_installs_gates_and_uninstalls` and `shim_fails_closed_when_the_baked_blueline_binary_is_missing` either create or execute on-disk `#!/bin/sh` scripts / symlinks that Windows cannot create or exec, so they now run only on Unix like the other platform-specific tests in the suite.
 
+- **npm v1 lockfile depth overflow and missing-version entries now fail closed.**
+  `walk_v1_dependencies` no longer silently truncates nesting past
+  `MAX_LOCKFILE_RECURSION_DEPTH` (32) or drops entries with no version; both
+  return `LockfileError::InvalidData` naming the path, refusing to review a
+  lockfile whose dependency graph would otherwise shrink
+  (`lockfile::tests::v1_recursion_depth_overflow_is_refused`,
+  `lockfile::tests::v1_missing_version_is_refused`).
+
+- **npm lockfile paths that normalize to the same package key no longer overwrite.**
+  v2/v3 entries whose raw paths normalize to one key (e.g. `./node_modules/x`
+  and `node_modules/x`) are refused when they describe different entries, naming
+  both raw paths; byte-identical duplicates dedupe silently
+  (`lockfile::tests::npm_normalized_path_collision_with_differing_entries_is_refused`,
+  `lockfile::tests::npm_normalized_single_entry_unaffected_by_collision_check`,
+  `lockfile::tests::npm_normalized_path_identical_duplicates_dedupe_silently`).
+
 - **Provenance `allowed_repositories` no longer accepts a spoofed host prefix.**
   `is_repo_allowed` required only that the normalized repository ended with the
   allowed pattern at a `/` or `:` boundary, so `evil.com/github.com/org/app`
