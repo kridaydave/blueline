@@ -59,8 +59,10 @@ vulnerable `cache_ttl_hours_vulnerable = 1`. Chosen by `report.hits.is_empty()`,
 not by status. `Unverified` and `StaleCache` reports are **never written** to the
 cache.
 
-Rule wiring: `R09_ADVISORY_MALWARE` (`Block`), `R09_ADVISORY_CRITICAL_CVE`
-(`Block`), `R09_ADVISORY_CVE` (**`hit.severity` passed through verbatim**).
+Rule wiring: `R09_ADVISORY_MALWARE` (`Block` by default;
+`policy.advisories.block_on_malware = false` uses the hit's own severity),
+`R09_ADVISORY_CRITICAL_CVE` (`Block`), `R09_ADVISORY_CVE`
+(**`hit.severity` passed through verbatim**).
 
 ## Gotchas
 - **The recall pre-check is the first statement in `resolve_advisories`.** A hit
@@ -70,9 +72,11 @@ Rule wiring: `R09_ADVISORY_MALWARE` (`Block`), `R09_ADVISORY_CRITICAL_CVE`
   `check_advisories = false` silence revocations; adding the hit to
   `put_cached_advisories` lets a stale row mask a fresh revocation. Both are
   named regressions in CHANGELOG.
-- **`block_on_malware = false` does not soften a recall hit**, because
-  `heuristic.rs` branches on `if hit.is_malware` → `Block` unconditionally. The
-  flag only affects the `AdvisoryItem.severity` field the CVE branch reads.
+- **`block_on_malware = false` now softens malware advisory findings in
+  heuristic R09** (including malware-tagged hits) by using the hit's own
+  severity instead of forcing `Block`
+  (`heuristic::tests::block_on_malware_flag_false_uses_advisory_severity`;
+  default-true behavior is unchanged).
 - **`fallback_or_fail` ordering defeats `fail_closed_network`.** Priority is:
   (1) stale-but-parseable cache → `Ok(StaleCache)` **regardless of policy**;
   (2) `fail_closed_network` → `Err`; (3) `Ok(AdvisoryReport::unverified(..))`.

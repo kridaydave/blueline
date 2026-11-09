@@ -139,9 +139,14 @@ pub fn evaluate_with_trust(
     if let Some(adv_rep) = advisories {
         for hit in &adv_rep.hits {
             if hit.is_malware {
+                let severity = if policy.advisories.block_on_malware {
+                    VerdictBand::Block
+                } else {
+                    hit.severity
+                };
                 findings.push(Finding {
                     rule_id: "R09_ADVISORY_MALWARE".into(),
-                    severity: VerdictBand::Block,
+                    severity,
                     title: format!("Known malware advisory: {}", hit.id),
                     description: hit.summary.clone(),
                 });
@@ -3779,6 +3784,74 @@ mod tests {
                 .iter()
                 .any(|f| f.rule_id == "R09_ADVISORY_MALWARE")
         );
+    }
+
+    #[test]
+    fn block_on_malware_flag_false_uses_advisory_severity() {
+        let delta = Delta {
+            baseline_version: Some("1.0.0".into()),
+            target_version: "1.0.1".into(),
+            files_added: vec![],
+            files_removed: vec![],
+            files_modified: vec![],
+            total_lines_added: 0,
+            total_lines_deleted: 0,
+            new_executables: vec![],
+            new_binaries: vec![],
+            modified_binaries: vec![],
+            new_lifecycle_scripts: vec![],
+            modified_lifecycle_scripts: vec![],
+            new_dependencies: vec![],
+            modified_dependencies: vec![],
+            binding_gyp_added: false,
+            removed_dependencies: Vec::new(),
+        };
+
+        let adv = AdvisoryReport {
+            status: crate::advisory::AdvisoryStatus::Vulnerable,
+            hits: vec![crate::advisory::AdvisoryItem {
+                id: "MAL-2026-9999".into(),
+                summary: "Credential stealer in package".into(),
+                details: "".into(),
+                aliases: vec![],
+                severity: VerdictBand::High,
+                cvss_score: None,
+                is_malware: true,
+            }],
+            source: "osv.dev".into(),
+            message: None,
+        };
+
+        let mut policy = Policy::default();
+        policy.advisories.block_on_malware = false;
+        let verdict = evaluate_with_trust(
+            "pkg",
+            Ecosystem::Npm,
+            "verified (sha512)",
+            &delta,
+            false,
+            false,
+            None,
+            false,
+            None,
+            false,
+            None,
+            &policy,
+            Some(&adv),
+            None,
+        );
+
+        assert_ne!(
+            verdict.band,
+            VerdictBand::Block,
+            "block_on_malware=false must not force a Block: {verdict:?}"
+        );
+        let malware = verdict
+            .findings
+            .iter()
+            .find(|f| f.rule_id == "R09_ADVISORY_MALWARE")
+            .expect("malware finding must still be reported");
+        assert_eq!(malware.severity, VerdictBand::High);
     }
 
     #[test]
