@@ -462,7 +462,7 @@ pub fn parse_requirements_txt_packages(
         )));
     }
 
-    let mut packages = BTreeMap::new();
+    let mut packages: BTreeMap<String, PackageEntry> = BTreeMap::new();
     let mut unpinned_errors = Vec::new();
 
     // Process line continuations (lines ending in `\`)
@@ -672,16 +672,24 @@ pub fn parse_requirements_txt_packages(
             };
 
             let canon_name = crate::version::canonicalize_name(name);
-            packages.insert(
-                canon_name,
-                PackageEntry {
-                    name: name.to_string(),
-                    version: ver.to_string(),
-                    integrity,
-                    resolved: None,
-                    is_dev: false,
-                },
-            );
+            let entry = PackageEntry {
+                name: name.to_string(),
+                version: ver.to_string(),
+                integrity,
+                resolved: None,
+                is_dev: false,
+            };
+            if let Some(prev) = packages.get(&canon_name) {
+                if prev.version != entry.version || prev.integrity != entry.integrity {
+                    return Err(LockfileError::InvalidData(format!(
+                        "duplicate requirements entry for `{canon_name}` (`{name}`) with differing \
+                         pins; refusing to review a requirements file whose package graph is ambiguous"
+                    )));
+                }
+                // Identical version+integrity (case-variant spellings allowed): keep one.
+                continue;
+            }
+            packages.insert(canon_name, entry);
         } else {
             unpinned_errors.push(format!(
                 "  line {line_num}: unpinned package `{spec}` (must use `name==version`)"
@@ -2022,6 +2030,27 @@ requests==2.31.0 \
         let trailing_cont = "pkg==1.0.0 \\\n";
         let parsed_trailing = parse_requirements_txt_packages(trailing_cont, false).unwrap();
         assert_eq!(parsed_trailing["pkg"].version, "1.0.0");
+    }
+
+    #[test]
+    fn requirements_duplicate_differing_pins_are_refused() {
+        let content = "foo==1.0.0\nfoo==2.0.0\n";
+        let err = parse_requirements_txt_packages(content, false).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("foo") && (msg.contains("duplicate") || msg.contains("differ")),
+            "error should name the package and explain the duplicate, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn requirements_case_variant_same_version_dedupes() {
+        let content = "Foo==1.2.3\nfoo==1.2.3\n";
+        let pkgs = parse_requirements_txt_packages(content, false).unwrap();
+        assert_eq!(pkgs.len(), 1);
+        let (key, entry) = pkgs.iter().next().unwrap();
+        assert_eq!(key, "foo");
+        assert_eq!(entry.version, "1.2.3");
     }
 
     /// An entry whose `name` is the empty string takes its name from the key.

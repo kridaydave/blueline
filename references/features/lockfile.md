@@ -76,9 +76,9 @@ All three caps use strict `>`; each is pinned at exactly-cap and cap+1.
   excluded from that list.
 - **requirements.txt extras are stripped to the base name** for the map key and
   validated to end with `]`. `Flask` → key `flask`, `entry.name = "Flask"`.
-  Because the key is canonical, `Foo` and `foo` in one file **silently
-  overwrite** each other — there is no duplicate detection, unlike Cargo, which
-  errors on a differing duplicate.
+  Because the key is canonical, duplicate entries for one canonical name are
+  refused when their pins differ (version or integrity), naming the package;
+  case-variant identical pins (same version+integrity) dedupe to one entry.
 - **`compute_delta_from_maps` ignores `is_dev` and `resolved` in the equality
   test.** A `resolved` URL change alone is invisible. It is a single O(n)
   `BTreeMap` merge on `Ordering`, with `Equal` meaning "same map key".

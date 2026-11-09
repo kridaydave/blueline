@@ -53,6 +53,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 - **Gate four integration tests on Unix so the cross-platform test matrix passes on Windows.** `recall_export_osv_refuses_symlink_out`, `install_delegates_to_npm_with_ignore_scripts`, `shim_installs_gates_and_uninstalls` and `shim_fails_closed_when_the_baked_blueline_binary_is_missing` either create or execute on-disk `#!/bin/sh` scripts / symlinks that Windows cannot create or exec, so they now run only on Unix like the other platform-specific tests in the suite.
 
+- **Duplicate `requirements.txt` pins for one canonical package no longer overwrite.**
+  Differing duplicates (version or integrity) return `LockfileError::InvalidData`
+  naming the package, refusing to review a requirements file whose package graph
+  is ambiguous; case-variant identical pins (same version+integrity) dedupe to
+  one entry
+  (`lockfile::tests::requirements_duplicate_differing_pins_are_refused`,
+  `lockfile::tests::requirements_case_variant_same_version_dedupes`).
+
 - **npm v1 lockfile depth overflow and missing-version entries now fail closed.**
   `walk_v1_dependencies` no longer silently truncates nesting past
   `MAX_LOCKFILE_RECURSION_DEPTH` (32) or drops entries with no version; both

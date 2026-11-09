@@ -4120,6 +4120,32 @@ mod tests {
             "https://evil.com/github.com/org/app",
             "github.com/org/app"
         ));
+
+        // A colon before the first slash can mean host:port or scp-style host:path.
+        // Digits between them indicate a port, so the path starts after the slash.
+        assert!(is_repo_allowed(
+            "https://github.com:443/org/app.git",
+            "github.com:443/org/app"
+        ));
+        assert!(!is_repo_allowed(
+            "https://github.com:443/org/app.git",
+            "github.com/org/app"
+        ));
+
+        // Non-numeric text between colon and slash is scp-style, so the path starts
+        // after the colon (not the slash).
+        assert!(is_repo_allowed(
+            "git@github.com:org/app.git",
+            "github.com/org/app"
+        ));
+        assert!(is_repo_allowed(
+            "git@github.com:org/app.git",
+            "github.com/org"
+        ));
+        assert!(!is_repo_allowed(
+            "git@github.com:org/app.git",
+            "github.com/org2"
+        ));
     }
 
     #[test]
