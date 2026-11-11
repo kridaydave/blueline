@@ -1,16 +1,18 @@
 #!/usr/bin/env bash
 #
-# verify.sh — the single source of truth for "did I pass?".
+# verify.sh — local gate runner for blueline.
 #
-# Every stage runs the EXACT command line `.github/workflows/ci.yml` runs,
-# flags included. Do not "fix" a command here to make it faster or quieter:
-# if this script diverges from CI, the script is the bug.
+# Runs the core Rust/doc gates with the same command lines CI enforces where
+# practical. CI also runs actionlint, RustSec+deny in the audit job, PR
+# dogfood, and 32-shard diff-based mutation testing with CI-specific excludes
+# and timeouts; local `--mutants` is a narrower/manual check unless you mirror
+# CI args.
 #
-#   ./scripts/verify.sh            fmt + clippy + test + references  (the gate)
-#   ./scripts/verify.sh --fast     same as above; accepted for symmetry
-#   ./scripts/verify.sh --mutants  the gate, then mutation testing
+#   ./scripts/verify.sh            fmt + clippy + test + references — the gate
+#   ./scripts/verify.sh --fast     same as above
+#   ./scripts/verify.sh --mutants  the gate, then mutation testing (best effort)
 #   ./scripts/verify.sh --fuzz     the gate, then a libFuzzer smoke per target
-#   ./scripts/verify.sh --all      the gate, mutants, + supply-chain audit
+#   ./scripts/verify.sh --all      the gate, mutants, plus the cargo-deny supply-chain audit
 #
 # Works from any cwd: the repo root is resolved from this script's location.
 
@@ -20,10 +22,13 @@ REPO_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
 
 # Mutation targets: derived from the repo, never a hand-maintained list.
-# Same globs as ci.yml. Only files with no mutable expressions are skipped
-# (see ci.yml for the reason); lib.rs and error.rs are pure declarations.
+# Keep in sync with .github/workflows/ci.yml (BLUELINE_MUTANTS_SKIP and
+# target globs). lib.rs and error.rs are pure declarations.
 MUTANTS_SKIP="src/lib.rs
 src/error.rs"
+# CI carries a long exclude regex for unbuildable/true-equivalent/fork-bomb
+# mutants. Local runs use the same excludes for parity when --mutants is used.
+MUTANTS_EXCLUDE='with .*Default::default\(\)|replace && with \|\| in .*|delete ! in (spawn_child|may_spawn_child|may_spawn_child_given|export_osv)|replace may_spawn_child(_given)? -> bool with true|replace <= with > in evaluate_candidates|replace == with != in scan_file|replace < with <= in levenshtein_at_most_one|replace < with > in levenshtein_at_most_one|replace \+= with \*= in levenshtein_at_most_one|replace > with < in levenshtein_at_most_one'
 
 RUN_MUTANTS=0
 RUN_FUZZ=0
@@ -33,11 +38,10 @@ usage() {
     cat <<'EOF'
 usage: scripts/verify.sh [--fast] [--mutants] [--fuzz] [--all]
 
-  (default)  fmt + clippy + test + references — the gate CI enforces
+  (default)  fmt + clippy + test + references — the gate
   --fast     same as default
-  --mutants  the gate, then cargo-mutants over the security-critical engine
-  --fuzz     the gate, then a libFuzzer smoke per target (60 s each,
-             override with BLUELINE_FUZZ_SECS)
+  --mutants  the gate, then mutation testing (best effort)
+  --fuzz     the gate, then a libFuzzer smoke per target (60 s each; override with BLUELINE_FUZZ_SECS)
   --all      the gate, mutants, plus the cargo-deny supply-chain audit
 EOF
 }
@@ -56,15 +60,19 @@ done
 declare -a PASSED=()
 
 stage() {
-    local name="$1"; shift
-    printf '\n\033[1m==> %s\033[0m\n    $ %s\n\n' "$name" "$*"
+    local name="$1"; local priority="$2"; local category="$3"; local ci_job="$4"; local fix_hint="$5"; shift 5
+    printf '\n\033[1m==> [%s %s] %s\033[0m\n    ci_job: %s\n    $ %s\n\n' "$priority" "$category" "$name" "$ci_job" "$*"
     if "$@"; then
-        PASSED+=("$name")
+        PASSED+=("$priority $category $name")
     else
         local rc=$?
-        printf '\n\033[1;31mFAIL\033[0m  %s (exit %d)\n' "$name" "$rc" >&2
-        printf '      stage: %s\n' "$name" >&2
-        printf '      cmd:   %s\n' "$*" >&2
+        printf '\n\033[1;31mFAIL\033[0m  [%s %s] %s (exit %d)\n' "$priority" "$category" "$name" "$rc" >&2
+        printf '      category: %s\n' "$category" >&2
+        printf '      priority: %s\n' "$priority" >&2
+        printf '      ci_job:   %s\n' "$ci_job" >&2
+        printf '      stage:    %s\n' "$name" >&2
+        printf '      cmd:      %s\n' "$*" >&2
+        printf '      fix_first: %s\n' "$fix_hint" >&2
         exit "$rc"
     fi
 }
@@ -82,12 +90,12 @@ stage_mutants() {
         echo "no mutation targets resolved from git ls-files" >&2
         return 1
     fi
-    echo "mutating ${#files[@]} files"
+    echo "mutating ${#files[@]} files (local/manual; CI uses 32-shard --in-diff runs, timeout 300s, and the same excludes)"
     local args=() f
     for f in "${files[@]}"; do args+=(--file "$f"); done
     local exclude
     exclude="$(cat scripts/mutants_exclude.re)"
-    cargo mutants "${args[@]}" --in-place --baseline=skip --timeout 300 --exclude-re "$exclude"
+    cargo mutants "${args[@]}" --exclude-re "$exclude" --in-place --baseline=skip --timeout 300
 }
 
 stage_deny() {
@@ -139,38 +147,46 @@ stages="fmt, clippy, test, references"
 echo "repo:      $REPO_ROOT"
 echo "toolchain: $(rustc --version 2>/dev/null || echo 'rustc not on PATH')"
 echo "stages:    $stages"
+echo "note: CI also runs P2 gate.workflow.lint (actionlint), RustSec as part of P1 gate.security.audit, PR dogfood gates (P3/P4), and 32-shard diff-based mutation testing (P1). Local runs do not fully mirror PR/push mutation sharding."
 
-# The Rust gate. Verbatim from ci.yml — note the two flags that are easy to
-# drop and were dropped in AGENTS.md: fmt's --check (without it, fmt REWRITES
-# your files instead of failing) and clippy's --locked (without it, clippy may
-# resolve a different dependency graph than CI).
-stage "Format"    cargo fmt --all -- --check
-stage "Clippy"    cargo clippy --all-targets --locked -- -D warnings
-# nextest is preferred when it is installed: it overlaps the 15 test binaries
-# instead of running them one at a time, which is the difference between 22 s
-# and about 12 s on the dev box. Fall back to `cargo test` so a checkout
-# without nextest still passes the gate identically (same flags, same tests).
+stage "Format" "P0" "gate.rust.format" "fmt" \
+    "Run cargo fmt --all, then re-run verify.sh." \
+    cargo fmt --all -- --check
+stage "Clippy" "P0" "gate.rust.lint" "lint" \
+    "Fix clippy errors/warnings; do not proceed past static lint failures." \
+    cargo clippy --all-targets --locked -- -D warnings
 if command -v cargo-nextest >/dev/null 2>&1; then
-    stage "Tests" cargo nextest run --all-targets --locked --test-threads 8
+    echo "test runner: cargo-nextest (CI uses nextest --test-threads 8)"
+    stage "Tests" "P0" "gate.rust.test" "test" \
+        "Fix failing tests before lower-priority gates." \
+        cargo nextest run --all-targets --locked --test-threads 8
 else
-    stage "Tests" cargo test --all-targets --locked
+    echo "test runner: cargo test (CI uses cargo-nextest --test-threads 8)"
+    stage "Tests" "P0" "gate.rust.test" "test" \
+        "Fix failing tests before lower-priority gates." \
+        cargo test --all-targets --locked
 fi
 
-# The agent-facing map is prose, so no Rust gate can see it rot. This resolves
-# every citation in references/ against the tracked tree. Not part of "the Rust
-# gate" the comment above describes; it is a separate claim about the docs.
-stage "References" scripts/check-references.sh
-
 if [ "$RUN_ALL" -eq 1 ]; then
-    stage "Supply-chain audit"   stage_deny
+    stage "Supply-chain audit" "P1" "gate.security.audit" "audit" \
+        "Review cargo-deny output (advisories/licenses/bans/sources). CI also runs RustSec." \
+        stage_deny
 fi
 
 if [ "$RUN_MUTANTS" -eq 1 ]; then
-    stage "Mutation testing" stage_mutants
+    stage "Mutation testing" "P1" "gate.security.mutation" "mutants-local (CI: mutants-pr/mutants, 32 shards, --in-diff)" \
+        "Inspect cargo-mutants output/survivors; local mutants are not identical to CI's 32-shard in-diff runs." \
+        stage_mutants
 fi
 
 if [ "$RUN_FUZZ" -eq 1 ]; then
-    stage "Fuzz smoke" stage_fuzz
+    stage "Fuzz smoke" "P1" "gate.security.fuzz" "fuzz-smoke" \
+        "Investigate fuzz crashes/artifacts; fuzz smoke is best-effort locally but part of CI for parse/extract diffs." \
+        stage_fuzz
 fi
+
+stage "References" "P2" "gate.docs.references" "references" \
+    "Repair broken references/citations in references/." \
+    scripts/check-references.sh
 
 printf '\n\033[1;32mPASS\033[0m  %s\n' "$(IFS=, ; echo "${PASSED[*]}")"

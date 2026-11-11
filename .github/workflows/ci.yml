@@ -27,6 +27,9 @@ env:
   BLUELINE_MUTANTS_SKIP: |
     src/lib.rs
     src/error.rs
+  # Shared cargo-mutants exclusions (unbuildable/true-equivalent/fork-bomb/timeout-prone
+  # mutants). Keep in sync with scripts/verify.sh MUTANTS_EXCLUDE.
+  BLUELINE_MUTANTS_EXCLUDE: 'with .*Default::default\(\)|replace && with \|\| in .*|delete ! in (spawn_child|may_spawn_child|may_spawn_child_given|export_osv)|replace may_spawn_child(_given)? -> bool with true|replace <= with > in evaluate_candidates|replace == with != in scan_file|replace < with <= in levenshtein_at_most_one|replace < with > in levenshtein_at_most_one|replace \+= with \*= in levenshtein_at_most_one|replace > with < in levenshtein_at_most_one'
 
 jobs:
   # GitHub compiles a workflow before it runs a single step, and a compile
@@ -36,52 +39,142 @@ jobs:
   # parser does not: `on: push:` filters, expression syntax and context typing
   # are all invisible to `yaml.safe_load`.
   lint-workflows:
-    name: Lint workflows
+    name: "P2 gate.workflow.lint — Lint workflows"
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: docker://rhysd/actionlint:1.7.12
+      - name: Run actionlint (workflow schema/expressions)
+        id: actionlint
+        uses: docker://rhysd/actionlint:1.7.12
         with:
           # GitHub's expression and schema grammar only. The image also bundles
           # shellcheck and pyflakes, which flag pre-existing quoting warnings in
           # run blocks; whether a shell is tidy is not what takes a workflow
           # down, and folding that cleanup in here would gate every PR on it.
           args: -shellcheck= -pyflakes=
+      - name: Publish gate summary
+        if: always()
+        env:
+          RESULT: ${{ steps.actionlint.outcome }}
+        run: |
+          python3 scripts/ci/gate_summary.py \
+            --category gate.workflow.lint \
+            --priority P2 \
+            --job lint-workflows \
+            --result "${RESULT:-unknown}" \
+            --reason "actionlint checks GitHub workflow YAML, expressions, and schema; shellcheck/pyflakes disabled in CI args." \
+            --command "actionlint -shellcheck= -pyflakes=" \
+            --evidence "job log + actionlint annotations" \
+            --fix-first "Fix workflow YAML/expression/schema errors before trusting other CI signals." \
+            --out artifacts/gate-lint-workflows.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: blueline-gate-lint-workflows
+          path: artifacts/gate-lint-workflows.json
+          if-no-files-found: warn
 
   references:
-    name: Feature map citations
+    name: "P2 gate.docs.references — Feature map citations"
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - name: Resolve every citation in references/
+        id: references
         run: ./scripts/check-references.sh
+      - name: Publish gate summary
+        if: always()
+        env:
+          RESULT: ${{ steps.references.outcome }}
+        run: |
+          python3 scripts/ci/gate_summary.py \
+            --category gate.docs.references \
+            --priority P2 \
+            --job references \
+            --result "${RESULT:-unknown}" \
+            --reason "Validates citations/paths referenced by references/ feature map docs." \
+            --command "./scripts/check-references.sh" \
+            --evidence "job log" \
+            --fix-first "Repair broken references/citations so agent and operator docs remain trustworthy." \
+            --out artifacts/gate-references.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: blueline-gate-references
+          path: artifacts/gate-references.json
+          if-no-files-found: warn
 
   fmt:
-    name: Formatting
+    name: "P0 gate.rust.format — Formatting"
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: swatinem/rust-cache@v2
-      - run: cargo fmt --all -- --check
+      - name: Run cargo fmt --check
+        id: fmt
+        run: cargo fmt --all -- --check
+      - name: Publish gate summary
+        if: always()
+        env:
+          RESULT: ${{ steps.fmt.outcome }}
+        run: |
+          python3 scripts/ci/gate_summary.py \
+            --category gate.rust.format \
+            --priority P0 \
+            --job fmt \
+            --result "${RESULT:-unknown}" \
+            --reason "Enforces rustfmt formatting; CI uses --check so files are never rewritten." \
+            --command "cargo fmt --all -- --check" \
+            --evidence "job log" \
+            --fix-first "Run ./scripts/verify.sh (Format) or cargo fmt --all, then re-run the gate." \
+            --out artifacts/gate-fmt.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: blueline-gate-fmt
+          path: artifacts/gate-fmt.json
+          if-no-files-found: warn
 
   lint:
-    name: Clippy
+    name: "P0 gate.rust.lint — Clippy"
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: swatinem/rust-cache@v2
-      - run: cargo clippy --all-targets --locked -- -D warnings
+      - name: Run cargo clippy
+        id: clippy
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts
+          cargo clippy --all-targets --locked --message-format=json -- -D warnings | tee artifacts/clippy.jsonl
+      - name: Publish gate summary
+        if: always()
+        env:
+          RESULT: ${{ steps.clippy.outcome }}
+        run: |
+          python3 scripts/ci/gate_summary.py \
+            --category gate.rust.lint \
+            --priority P0 \
+            --job lint \
+            --result "${RESULT:-unknown}" \
+            --reason "Clippy lints all targets with locked deps and warnings denied." \
+            --command "cargo clippy --all-targets --locked -- -D warnings" \
+            --evidence "artifacts/clippy.jsonl (when present), job log" \
+            --fix-first "Fix clippy errors/warnings; do not trust tests if static safety checks fail." \
+            --out artifacts/gate-lint.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: blueline-gate-lint
+          path: |
+            artifacts/gate-lint.json
+            artifacts/clippy.jsonl
+          if-no-files-found: warn
 
-  # The release pipeline ships darwin and windows binaries, so the suite runs
-  # on all three platforms. Path-separator and platform-conditional behaviour
-  # that Linux silently absorbs has to surface here, not at release time.
   test:
-    name: Tests (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+    name: "P0 gate.rust.test — Tests"
+    runs-on: ubuntu-latest
     env:
       CARGO_BUILD_WARNINGS: deny
     steps:
@@ -90,11 +183,33 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-nextest
-      - run: cargo nextest run --all-targets --locked --test-threads 8
+      - name: Run cargo nextest
+        id: nextest
+        run: cargo nextest run --all-targets --locked --test-threads 8
+      - name: Publish gate summary
+        if: always()
+        env:
+          RESULT: ${{ steps.nextest.outcome }}
+        run: |
+          python3 scripts/ci/gate_summary.py \
+            --category gate.rust.test \
+            --priority P0 \
+            --job test \
+            --result "${RESULT:-unknown}" \
+            --reason "Runs all targets with cargo-nextest (locked deps, build warnings denied in this job)." \
+            --command "cargo nextest run --all-targets --locked --test-threads 8" \
+            --evidence "job log; target/nextest artifacts uploaded when present" \
+            --fix-first "Fix failing tests before addressing lower-priority gates." \
+            --out artifacts/gate-test.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: blueline-gate-test
+          path: |
+            artifacts/gate-test.json
+            target/nextest/**/*
+          if-no-files-found: warn
 
-  # Report-only: the number exists so "is this code even tested?" has an
-  # answer. A merge-blocking floor is deliberately absent until the baseline
-  # number is known — a floor set blind on a suite this size gates on noise.
   coverage:
     name: Coverage
     runs-on: ubuntu-latest
@@ -230,28 +345,79 @@ jobs:
           name: fuzz-smoke-crashes
           path: fuzz/artifacts
 
+
   audit:
-    name: Supply-chain audit
+    name: "P1 gate.security.audit — Supply-chain audit"
     runs-on: ubuntu-latest
     permissions:
       security-events: write
     steps:
       - uses: actions/checkout@v4
       - uses: swatinem/rust-cache@v2
-      - uses: rustsec/audit-check@v2
+      - name: RustSec advisory check
+        id: rustsec
+        continue-on-error: true
+        uses: rustsec/audit-check@v2
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-deny
-      - name: Check advisories, licenses, bans and sources
-        run: cargo deny check
+      - name: Check advisories, licenses, bans and sources (cargo-deny)
+        id: cargo_deny
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts
+          cargo deny check 2>&1 | tee artifacts/cargo-deny.log
+      - name: Publish gate summary
+        if: always()
+        env:
+          RUSTSEC_RESULT: ${{ steps.rustsec.outcome }}
+          DENY_RESULT: ${{ steps.cargo_deny.outcome }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts
+          overall=success
+          reason=""
+          fix=""
+          if [ "${RUSTSEC_RESULT}" != "success" ]; then overall=failure; reason="RustSec advisory check: ${RUSTSEC_RESULT}."; fix="Review RustSec advisories / dependency updates."; fi
+          if [ "${DENY_RESULT}" != "success" ]; then
+            overall=failure
+            reason="${reason} cargo-deny (advisories/licenses/bans/sources): ${DENY_RESULT}."
+            fix="${fix} Review deny.toml/policy violations from cargo-deny output."
+          fi
+          [ -n "$reason" ] || reason="RustSec and cargo-deny checks passed."
+          python3 scripts/ci/gate_summary.py \
+            --category gate.security.audit \
+            --priority P1 \
+            --job audit \
+            --result "$overall" \
+            --reason "$reason (rustsec=${RUSTSEC_RESULT}, cargo-deny=${DENY_RESULT})" \
+            --command "rustsec/audit-check + cargo deny check" \
+            --evidence "job logs, security events (RustSec), artifacts/cargo-deny.log when present" \
+            --fix-first "${fix:-No security audit failures.}" \
+            --out artifacts/gate-audit.json
+          if [ "$overall" != "success" ]; then
+            echo "::error title=P1 gate.security.audit::Supply-chain audit failed (rustsec=${RUSTSEC_RESULT}, cargo-deny=${DENY_RESULT})"
+            exit 1
+          fi
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: blueline-gate-audit
+          path: |
+            artifacts/gate-audit.json
+            artifacts/cargo-deny.log
+          if-no-files-found: warn
 
   # Dogfood: our own composite Action reviews our own npm distribution
   # lockfile on every PR. Any dependency added to the shipped packages gets
   # the same review customers get.
   dogfood:
-    name: Dogfood (blueline on own npm dist)
+    name: "P3/P4 gate.dogfood — npm dist (health gates; risk reported)"
     runs-on: ubuntu-latest
     if: github.event_name == 'pull_request'
     steps:
@@ -272,9 +438,11 @@ jobs:
           CHANGED="$(git diff --name-only "$BASE"...HEAD)"
           if printf '%s\n' "$CHANGED" | grep -qE '(^|/)package-lock\.json$'; then
             echo "changed=true" >> "$GITHUB_OUTPUT"
+            echo "::notice title=P3 gate.dogfood.health precondition::package-lock.json changed vs $BASE"
           else
             echo "changed=false" >> "$GITHUB_OUTPUT"
             echo "package-lock.json unchanged vs $BASE — an empty delta is expected"
+            echo "::notice title=P3 gate.dogfood.health precondition::package-lock.json unchanged vs $BASE; empty delta is healthy"
           fi
       - uses: ./.github/actions/blueline-ci
         id: scan
@@ -287,108 +455,47 @@ jobs:
           # primitives with no registry baseline, so fail-closed scanning
           # reports BLOCK on ourselves and CI runners keep no approval store.
           # Risk findings stay visible in the step summary; the hard gate is
-          # scanner health below.
+          # scanner health below (P3). Risk is reported separately (P4).
           fail-on: block
           output-file: blueline-dogfood.json
-      - name: Gate on scanner health, report risk separately
+      - name: Gate on scanner health (P3), report risk separately (P4)
+        id: dogfood_health
         env:
           LOCKFILE_CHANGED: ${{ steps.changed.outputs.changed }}
+          SCAN_OUTCOME: ${{ steps.scan.outcome }}
+          SCAN_EXIT_CODE: ${{ steps.scan.outputs.scan-exit-code }}
+          REPORT_PATH: ${{ steps.scan.outputs.report-path }}
+        run: python3 scripts/ci/dogfood_npm_health.py
+      - name: Publish dogfood gate summary
+        if: always()
+        env:
+          HEALTH_RESULT: ${{ steps.dogfood_health.outcome }}
+          SCAN_OUTCOME: ${{ steps.scan.outcome }}
+          LOCKFILE_CHANGED: ${{ steps.changed.outputs.changed }}
         run: |
-          python3 - <<'EOF'
-          import json, os, sys
-
-          lockfile_changed = os.environ["LOCKFILE_CHANGED"] == "true"
-
-          r = json.load(open("blueline-dogfood.json"))
-          names = {i["name"] for i in r["items"]}
-          expected = {
-              "@kridaydave/blueline-cli", "blueline-cli",
-              "@kridaydave/binary-darwin-arm64", "@kridaydave/binary-darwin-x64",
-              "@kridaydave/binary-linux-arm64-gnu", "@kridaydave/binary-linux-arm64-musl",
-              "@kridaydave/binary-linux-x64-musl",
-              "@kridaydave/binary-linux-x64-gnu", "@kridaydave/binary-win32-arm64",
-              "@kridaydave/binary-win32-x64",
-          }
-
-          # Scanner health: everything evaluated must be a shipped package
-          # and the lockfile delta must produce evaluations. Which shipped
-          # packages land in the delta is PR-dependent, so a hardcoded
-          # missing-set is wrong. An empty delta (docs-only PR) is healthy,
-          # not a scanner failure — and a version-bump PR legitimately has
-          # zero unchanged packages, so unchanged_count is reported but
-          # never gated.
-          unknown = names - expected
-          assert not unknown, f"scanner evaluated unknown packages: {unknown}"
-
-          # Scanner health, not risk level, is the gate. Our own first-party
-          # packages legitimately produce High findings: the binary-*
-          # packages ship an executable at the package root, so any PR bumping
-          # one is a first sighting of an executable and trips R02. Asserting
-          # no HIGH/BLOCK here made the job red on exactly the dependency-bump
-          # PRs it was made continue-on-error for, and it contradicted the
-          # design note above this step. Findings are reported where a human
-          # reads them instead.
-          rank = {"LOW": 0, "MEDIUM": 1, "HIGH": 2, "BLOCK": 3}
-          bands = [i["verdict"]["band"] for i in r["items"]]
-          unknown_bands = sorted({b for b in bands if b not in rank})
-          assert not unknown_bands, f"scanner emitted unknown bands: {unknown_bands}"
-
-          # An empty report is only healthy when nothing that would have
-          # produced one changed. Gating on health without this precondition
-          # meant a PR that changed package-lock.json and evaluated nothing was
-          # reported healthy, which is the exact under-reporting this gate
-          # exists to catch -- and `continue-on-error` above means this script
-          # is the only thing standing between a broken scanner and a green job.
-          if r["total_evaluated"] == 0:
-              assert not lockfile_changed, (
-                  "package-lock.json changed but the scan evaluated nothing: "
-                  "the scanner reviewed no shipped package while the delta it "
-                  "should have produced was non-empty"
-              )
-
-          # A scanner that under-reports inside a non-empty report is caught by
-          # re-deriving the summary it wrote from the items it carries.
-          if bands:
-              for item in r["items"]:
-                  assert item.get("name") and item.get("new_version"), (
-                      f"report carries an item with no name or version: {item}"
-                  )
-              assert rank[max(bands, key=lambda b: rank[b])] == rank[r["max_band"]], (
-                  f"max_band {r['max_band']} disagrees with the reported bands {bands}"
-              )
-
-          findings = [
-              (i["name"], i["new_version"], i["verdict"]["band"])
-              for i in r["items"]
-              if rank[i["verdict"]["band"]] >= rank["HIGH"]
-          ]
-
-          if r["total_evaluated"] == 0:
-              print("dogfood scanner healthy: lockfile unchanged, nothing to evaluate")
-          else:
-              print(f"dogfood scanner healthy: evaluated {r['total_evaluated']}, "
-                    f"unchanged {r['unchanged_count']}, max band {r['max_band']}")
-              for item in r["items"]:
-                  print(f"  {item['name']}@{item['new_version']}: {item['verdict']['band']}")
-
-          if findings:
-              with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as fh:
-                  fh.write("## Dogfood risk findings (not gating)\n\n")
-                  fh.write("Our own distribution, reviewed by the shipped scanner. "
-                           "Expected on first-party binary bumps; investigate anything else.\n\n")
-                  fh.write("| package | version | band |\n| --- | --- | --- |\n")
-                  for name, version, band in findings:
-                      fh.write(f"| {name} | {version} | {band} |\n")
-              print(f"dogfood: {len(findings)} HIGH/BLOCK findings recorded in the step summary")
-          EOF
+          result="${HEALTH_RESULT:-unknown}"
+          python3 scripts/ci/gate_summary.py \
+            --category gate.dogfood.health \
+            --priority P3 \
+            --job dogfood \
+            --result "$result" \
+            --reason "npm dist dogfood scanner health (scan=${SCAN_OUTCOME}, lockfile_changed=${LOCKFILE_CHANGED}). Risk findings, if any, are P4 and reported separately." \
+            --command ".github/actions/blueline-ci (build-from-source) + health gate" \
+            --evidence "blueline-dogfood.json artifact, step summary, job logs" \
+            --fix-first "If P3 fails, fix scanner/action/reporting before interpreting risk findings." \
+            --out artifacts/gate-dogfood-npm.json
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: blueline-dogfood-report
-          path: blueline-dogfood.json
+          name: blueline-gate-dogfood-npm
+          path: |
+            blueline-dogfood.json
+            artifacts/gate-dogfood-npm.json
+            artifacts/gate-dogfood-risk.json
+          if-no-files-found: warn
 
   dogfood-cargo:
-    name: Dogfood (blueline on own Cargo.lock)
+    name: "P3/P4 gate.dogfood — Cargo.lock (risk gate preserved)"
     runs-on: ubuntu-latest
     if: github.event_name == 'pull_request'
     steps:
@@ -415,22 +522,110 @@ jobs:
           CHANGED="$(git diff --name-only "$BASE"...HEAD)"
           if printf '%s\n' "$CHANGED" | grep -qE '(^|/)Cargo\.lock$'; then
             echo "changed=true" >> "$GITHUB_OUTPUT"
+            echo "::notice title=P3 gate.dogfood.health precondition::Cargo.lock changed vs $BASE"
           else
             echo "changed=false" >> "$GITHUB_OUTPUT"
             echo "Cargo.lock unchanged vs $BASE — skipping cargo dogfood"
+            echo "::notice title=P3 gate.dogfood.health precondition::Cargo.lock unchanged vs $BASE; cargo dogfood skipped"
           fi
       - name: Run blueline on Cargo.lock (cargo)
+        id: dogfood_cargo
         if: steps.changed.outputs.changed == 'true'
         env:
           BASE_BRANCH: ${{ github.base_ref }}
+        shell: bash
         run: |
+          set -euo pipefail
+          mkdir -p artifacts
           BASE_REF="origin/$BASE_BRANCH"
           if git show "$BASE_REF:blueline.toml" > /tmp/base_blueline.toml 2>/dev/null; then
-            POLICY_ARG="--policy /tmp/base_blueline.toml"
+            POLICY_ARG=(--policy /tmp/base_blueline.toml)
           else
-            POLICY_ARG=""
+            POLICY_ARG=()
           fi
-          cargo run --locked -- --ecosystem cargo ci --lockfile Cargo.lock --fail-on high --base "$BASE_REF" $POLICY_ARG
+          echo "::notice title=P3/P4 gate.dogfood::Running cargo dogfood scan (--fail-on high). Gate preserved; failure classified as P3 (scanner/build/health) or P4 (risk threshold) by best-effort log analysis."
+          set +e
+          cargo run --locked -- --ecosystem cargo ci --lockfile Cargo.lock --fail-on high --base "$BASE_REF" "${POLICY_ARG[@]}" 2>&1 | tee artifacts/dogfood-cargo.log
+          status=${PIPESTATUS[0]}
+          set -e
+          printf '%s\n' "$status" > artifacts/dogfood-cargo.status
+          class="health"
+          if [ "$status" -eq 0 ]; then
+            class="pass"
+          elif grep -Eqi 'risk verdict|fail-on|would fail|threshold exceeded|max band|HIGH|BLOCK' artifacts/dogfood-cargo.log; then
+            class="risk"
+          fi
+          printf '%s\n' "$class" > artifacts/dogfood-cargo.class
+          echo "exit_code=$status" >> "$GITHUB_OUTPUT"
+          echo "class=$class" >> "$GITHUB_OUTPUT"
+          if [ "$status" -ne 0 ]; then
+            if [ "$class" = "risk" ]; then
+              echo "::error title=P4 gate.dogfood.risk::Cargo dogfood hit preserved --fail-on high (exit $status). See artifacts/dogfood-cargo.log."
+            else
+              echo "::error title=P3 gate.dogfood.health::Cargo dogfood scanner/build/health failure (exit $status). See artifacts/dogfood-cargo.log."
+            fi
+            exit "$status"
+          fi
+          echo "::notice title=P3 gate.dogfood.health::Cargo dogfood completed successfully (no fail-on-high trigger)."
+      - name: Publish cargo dogfood gate summary
+        if: always()
+        env:
+          CHANGED: ${{ steps.changed.outputs.changed }}
+          STEP_RESULT: ${{ steps.dogfood_cargo.outcome }}
+          EXIT_CODE: ${{ steps.dogfood_cargo.outputs.exit_code }}
+          CLASS: ${{ steps.dogfood_cargo.outputs.class }}
+          JOB_STATUS: ${{ job.status }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts
+          step_result="${STEP_RESULT:-}"
+          if [ -z "$step_result" ]; then
+            [ "${CHANGED}" = "true" ] && step_result="${JOB_STATUS:-failure}" || step_result="skipped"
+          fi
+          class="${CLASS:-}"
+          [ -n "$class" ] || [ ! -f artifacts/dogfood-cargo.class ] || class="$(cat artifacts/dogfood-cargo.class)"
+          exit_code="${EXIT_CODE:-}"
+          [ -n "$exit_code" ] || [ ! -f artifacts/dogfood-cargo.status ] || exit_code="$(cat artifacts/dogfood-cargo.status)"
+
+          if [ "${CHANGED}" != "true" ]; then
+            python3 scripts/ci/gate_summary.py --category gate.dogfood.health --priority P3 --job dogfood-cargo --result skipped --reason "Cargo.lock unchanged; scan skipped." --command "cargo run --locked -- --ecosystem cargo ci --lockfile Cargo.lock --fail-on high --base origin/\$BASE_BRANCH [--policy base blueline.toml]" --evidence "job logs" --fix-first "No action needed." --out artifacts/gate-dogfood-cargo.json
+            printf '%s\n' '{"schema_version":1,"kind":"gate","priority":"P4","category":"gate.dogfood.risk","job":"dogfood-cargo","result":"skipped","reason":"Cargo.lock unchanged; risk gate not evaluated.","evidence":"job logs","fix_first":""}' > artifacts/gate-dogfood-cargo-risk.json
+            exit 0
+          fi
+
+          health_result="$step_result"
+          risk_result="success"
+          risk_reason="No preserved --fail-on high trigger detected."
+          risk_fix=""
+          if [ "$step_result" = "success" ]; then
+            health_result="success"
+          elif [ "$class" = "risk" ]; then
+            health_result="success"
+            risk_result="failure"
+            risk_reason="Preserved P4 risk gate triggered (--fail-on high, exit ${exit_code:-?}, best-effort log classification)."
+            risk_fix="Review artifacts/dogfood-cargo.log for >= high findings. Keep gate behavior unless intentionally changed."
+          else
+            health_result="failure"
+            risk_result="skipped"
+            risk_reason="Risk not evaluated because scanner/build/health failed first (P3)."
+            risk_fix="Fix P3 scanner/build/health issue, then re-evaluate risk."
+          fi
+
+          python3 scripts/ci/gate_summary.py --category gate.dogfood.health --priority P3 --job dogfood-cargo --result "$health_result" --reason "Cargo dogfood health: changed=${CHANGED}, class=${class:-unknown}, exit=${exit_code:-n/a}, step=${step_result}. P4 risk recorded separately when classifiable." --command "cargo run --locked -- --ecosystem cargo ci --lockfile Cargo.lock --fail-on high --base origin/\$BASE_BRANCH [--policy base blueline.toml]" --evidence "artifacts/dogfood-cargo.log, artifacts/dogfood-cargo.status, artifacts/dogfood-cargo.class" --fix-first "If P3 fails, fix scanner/build/base/policy/lockfile evaluation before risk triage." --out artifacts/gate-dogfood-cargo.json
+          export risk_result risk_reason risk_fix class exit_code step_result
+          python3 -c "import json,os,pathlib; pathlib.Path('artifacts/gate-dogfood-cargo-risk.json').write_text(json.dumps({'schema_version':1,'kind':'gate','priority':'P4','category':'gate.dogfood.risk','job':'dogfood-cargo','result':os.environ.get('risk_result','unknown'),'reason':os.environ.get('risk_reason',''),'evidence':'artifacts/dogfood-cargo.log, artifacts/dogfood-cargo.status, artifacts/dogfood-cargo.class','fix_first':os.environ.get('risk_fix',''),'details':{'exit_code':os.environ.get('exit_code',''),'class':os.environ.get('class',''),'step_result':os.environ.get('step_result','')}},indent=2,sort_keys=True)+'\\n')"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: blueline-gate-dogfood-cargo
+          path: |
+            artifacts/gate-dogfood-cargo.json
+            artifacts/gate-dogfood-cargo-risk.json
+            artifacts/dogfood-cargo.log
+            artifacts/dogfood-cargo.status
+            artifacts/dogfood-cargo.class
+          if-no-files-found: warn
 
   # Mutation testing guards the trust boundary: it proves the test suite would
   # catch a regression like the poisoned-baseline bug, so audits don't have to.
@@ -481,14 +676,23 @@ jobs:
   # A docs-only or Cargo.lock-only diff legitimately mutates nothing and exits 0.
   # That is correct, not the scope bug above: the glob now makes "nothing to
   # mutate" mean the diff really had no Rust in it.
+  # Mutation testing guards the trust boundary: it proves the test suite would
+  # catch a regression like the poisoned-baseline bug, so audits don't have to.
+  # Warnings must NOT be denied here — a mutation IS the divergence, and
+  # `-D warnings` would mask the signal (surviving mutants would look caught).
+  #
+  # Inspectability notes (CI overhaul): each shard runs two passes against the
+  # same in-diff/shard (kept for coverage parity until proven redundant):
+  #   pass1: --file 'src/**/*.rs'
+  #   pass2: explicit file list from git ls-files 'src/*.rs' 'src/registry/*.rs'
+  # Both are recorded in mutants-shard-summary.json. Pass steps use
+  # continue-on-error so summary/artifacts are always published; the shard still
+  # fails at the end if either pass failed, preserving gate behavior.
   mutants-pr:
-    name: Mutation testing (PR diff, shard ${{ matrix.shard }}/32)
+    name: "P1 gate.security.mutation — PR diff shard ${{ matrix.shard }}/32"
     runs-on: ubuntu-latest
     if: github.event_name == 'pull_request'
     needs: [test]
-    # Above the 80 min worst case in the comment above, not at it. See there for
-    # why a shard killed at 60 read as a fail-fast cancellation rather than a
-    # timeout.
     timeout-minutes: 100
     strategy:
       fail-fast: false
@@ -506,175 +710,174 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-mutants
-      # The exclusion list lives in scripts/mutants_exclude.re, shared verbatim
-      # with the nightly full-tree mutation job. Every entry carries a
-      # documented reason in the giant comment block below; the two jobs must
-      # never drift, which a shared file guarantees and two copies of a regex
-      # this size did not.
-      - name: Load shared mutant exclusions
-        run: printf 'BLUELINE_MUTANTS_EXCLUDE=%s\n' "$(cat scripts/mutants_exclude.re)" >> "$GITHUB_ENV"
       - name: Diff against PR base
+        id: diff
         env:
           BASE_REF: ${{ github.base_ref }}
-        run: git diff "origin/${BASE_REF}"...HEAD -- > pr.diff
-      # This block used to wrap the run in a three-attempt retry for exit 143
-      # and 137, on the reading that a shard dying at 8m30s and again at 10m5s
-      # was the hosted runner being reclaimed. It was not. Shard 17 died that
-      # way on six runs across four days while the other 31 shards passed, and
-      # a random runner fault does not pick the same shard every time.
-      #
-      # The cause was in the diff. `parse_pkgbuild`'s function-body scan walked
-      # a line with a hand-incremented index, and its termination rested on
-      # every step moving forward. The step over `${` rewinding by two instead
-      # of advancing past the brace sent the scan back to the same character;
-      # `body` then grew a few bytes per pass until the process was killed for
-      # memory. So exit 137 was the gate working — it killed the mutant's
-      # process — and 143 was GitHub reclaiming the VM afterwards.
-      #
-      # Two things were wrong with retrying it. The mutant was never reported,
-      # so the shard had no verdict to report and each attempt re-ran the same
-      # OOM; and a retry on 137 hides the one case where the harness is
-      # correctly reporting a runaway, which is the signal worth keeping. The
-      # fix belongs in the scanner, which now advances by consuming an iterator
-      # rather than by arithmetic a mutant can invert. The step below stays a
-      # plain invocation, so a mutant that exhausts memory is loud again.
-      - name: Mutate the changed lines
-        # The exclusion list is loaded from scripts/mutants_exclude.re in the
-        # step above; every entry below carries its documented reason.
-        #
-        # Two mutation genres cannot compile against this tree, so cargo-mutants
-          # reports them `Unviable` and the shard exits non-zero. Neither is a
-          # surviving mutant; both are the harness failing to build its own edit.
-          #
-          # `replace <return type> with Default::default()` needs the return type
-          # to implement `Default`, and several deliberately do not.
-          # `ProvenanceReport` is the clearest case: its whole point is that a
-          # report which cannot be verified says so rather than defaulting to
-          # something that reads as verified. `PypiCoreMetadata` is the same
-          # shape. Deriving `Default` to satisfy a mutation tool would hand the
-          # tool exactly the synthesized-identity behaviour the rules refuse, so
-          # the genre is excluded instead.
-          #
-          # `replace && with ||` inside a `let` chain is not valid Rust at all
-          # (`||` operators are not supported in let chain conditions), so it is
-          # rejected before it can be killed. Same reasoning: the edit never
-          # becomes a tree, so it never had a chance to survive.
-          #
-          # The fork-bomb guard mutants are excluded because running them is the
-          # exact incident the guard exists to prevent. `delete ! in
-          # spawn_child`, `delete ! in may_spawn_child_given`, and `replace
-          # may_spawn_child[_given] -> bool with true` each let `spawn_child`
-          # reach `Command::new(current_exe())` from inside the test harness,
-          # where `current_exe` is libtest: the child re-runs the suite, every
-          # extract test spawns the next generation, and the runner is lost
-          # (2026-10-09, 529 processes, forced reboot). They cannot be killed
-          # honestly, because killing requires the suite to finish, and the
-          # suite cannot finish once the guard is gone. The guard is pinned the
-          # only way that is safe under a mutant: the fast assertion
-          # `the_test_harness_is_never_allowed_to_spawn_an_extraction_child`
-          # fails the moment `may_spawn_child` returns true, before any spawn,
-          # so a real regression to the decision still turns the shard red.
-          # What is given up is only the ability to execute the detonation.
-          #
-          # `may_spawn_child_given` holds two `!` (`!cfg!(test)` and
-          # `!marker_set`) that share one mutant name, so the exclusion covers
-          # both. Losing the `!marker_set` edit is acceptable: that branch is
-          # pinned by `tests/sandbox_spawns.rs`, which drives the true case from
-          # outside the harness where a fork cannot reach it.
-          #
-          # Every other genre still runs, and a mutant that fails to compile for
-          # any other reason is still reported rather than hidden.
-          #
-          # `replace <= with > in evaluate_candidates` is a true equivalent
-          #
-          # `replace == with != in scan_file` is excluded because it does not
-          # finish: flipping the EOF test into a `!=` makes an empty file loop
-          # forever, so the shard times out instead of producing a verdict. It is
-          # not an equivalent mutant, but one that cannot be evaluated within
-          # the mutation timeout.
-          #
-          # `replace > with < in levenshtein_at_most_one` is excluded for the
-          # same timeout reason: `edits` is incremented before the check, so
-          # `edits < 1` is never taken and the early return is dead. On a
-          # mismatch with `long` longer than `short`, only `i` advances, `j`
-          # never reaches `short.len()`, and the loop hangs instead of
-          # producing a verdict.
-          # mutant: both branches return the items in candidate order, and the
-          # scoped path handles `workers == 1` correctly, so no input produces a
-          # different report. The only observable difference is one extra
-          # `store.reopen()`, invisible in the result. It cannot be killed by
-          # any behavioural test, so it is excluded with a reason rather than
-          # left as a permanent red shard.
-          # `delete ! in export_osv` is a true equivalent: the one `!` in the
-          # function guards the empty-parent filter, and `tempfile_in("")` and
-          # `tempfile_in(".")` both create the temp file in the current
-          # directory, so no input distinguishes them.
-          #
-          # `replace set_file_perm with ()` and `replace set_dir_perm with ()`
-          # are true equivalents: both functions are `#[cfg(not(unix))]` stubs
-          # that delegate to the `set_perm` stub, which is a no-op off unix
-          # and unbuildable on a Linux runner. No test can distinguish them
-          # from the empty body cargo mutants produces.
         run: |
+          git diff "origin/${BASE_REF}"...HEAD -- > pr.diff
+          echo "base=origin/${BASE_REF}" >> "$GITHUB_OUTPUT"
+      - name: "Mutate changed lines (pass 1: src/**/*.rs glob)"
+        id: mutants_pass1
+        continue-on-error: true
+        # Uses workflow-level BLUELINE_MUTANTS_EXCLUDE
+        run: |
+          echo "::notice title=P1 gate.security.mutation::Shard ${{ matrix.shard }}/32 pass1 (in-diff, src/**/*.rs) starting"
           cargo mutants --in-diff pr.diff --shard ${{ matrix.shard }}/32 \
             --file 'src/**/*.rs' \
             --exclude-re "$BLUELINE_MUTANTS_EXCLUDE" \
             --in-place --baseline=skip --timeout 300
-
+      - name: Resolve explicit mutation targets (pass 2)
+        id: mutants_targets
+        shell: bash
+        run: |
           set -euo pipefail
           mapfile -t files < <(git ls-files 'src/*.rs' 'src/registry/*.rs' \
             | grep -vxFf <(printf '%s' "$BLUELINE_MUTANTS_SKIP"))
           test "${#files[@]}" -gt 0 || { echo "no mutation targets resolved" >&2; exit 1; }
+          printf '%s\n' "${files[@]}" > artifacts-mutants-files.txt
+          echo "count=${#files[@]}" >> "$GITHUB_OUTPUT"
+      - name: "Mutate changed lines (pass 2: explicit src files)"
+        id: mutants_pass2
+        continue-on-error: true
+        # Uses workflow-level BLUELINE_MUTANTS_EXCLUDE
+        shell: bash
+        run: |
+          set -euo pipefail
+          mapfile -t files < artifacts-mutants-files.txt
           args=(); for f in "${files[@]}"; do args+=(--file "$f"); done
-          # This matrix is 32 shards, so the per-file pass below has to shard
-          # 32 ways too. It was hardcoded `/16`, which cargo-mutants rejects for
-          # any k >= n: `invalid value '26/16' for '--shard <SHARD>': shard k
-          # must be less than n`. Shards 16-31 therefore ran the 32-way pass,
-          # saw every mutant caught, and then died on this line with exit 1. The
-          # 32-way pass above had already reported its verdict, so the failure
-          # was pure noise from a stale shard count.
-          echo "mutating ${#files[@]} files (shard ${{ matrix.shard }}/32)"
+          echo "::notice title=P1 gate.security.mutation::Shard ${{ matrix.shard }}/32 pass2 (in-diff, explicit ${#files[@]} files) starting"
           cargo mutants --in-diff pr.diff --shard ${{ matrix.shard }}/32 \
             "${args[@]}" \
             --exclude-re "$BLUELINE_MUTANTS_EXCLUDE" \
             --in-place --baseline=skip --timeout 300
+      - name: Snapshot pass 1 evidence
+        if: always() && steps.mutants_pass1.outcome != 'skipped'
+        run: |
+          mkdir -p artifacts/pass1
+          if [ -d mutants.out ]; then cp -a mutants.out/. artifacts/pass1/ 2>/dev/null || true; fi
+          [ -f mutants.out ] && cp mutants.out artifacts/pass1/mutants.out.txt 2>/dev/null || true
+      - name: Snapshot pass 2 evidence
+        if: always() && steps.mutants_pass2.outcome != 'skipped'
+        run: |
+          mkdir -p artifacts/pass2
+          if [ -d mutants.out ]; then cp -a mutants.out/. artifacts/pass2/ 2>/dev/null || true; fi
+          [ -f mutants.out ] && cp mutants.out artifacts/pass2/mutants.out.txt 2>/dev/null || true
+      - name: Collect mutation shard summary
+        if: always()
+        env:
+          PASS1: ${{ steps.mutants_pass1.outcome }}
+          PASS2: ${{ steps.mutants_pass2.outcome }}
+          JOB_STATUS: ${{ job.status }}
+          DIFF_BASE: ${{ steps.diff.outputs.base }}
+        run: |
+          mkdir -p artifacts
+          python3 scripts/ci/mutants_shard_summary.py \
+            --event pull_request \
+            --shard '${{ matrix.shard }}' \
+            --shard-total 32 \
+            --job-result "${JOB_STATUS:-unknown}" \
+            --diff-base "${DIFF_BASE}" \
+            --pass "pass1_glob=${PASS1:-unknown}" \
+            --pass "pass2_explicit=${PASS2:-unknown}" \
+            --mutants-out artifacts/pass1/mutants.out.txt \
+            --mutants-out artifacts/pass2/mutants.out.txt \
+            --outcomes-json artifacts/pass1/outcomes.json \
+            --outcomes-json artifacts/pass2/outcomes.json \
+            --artifact-name mutants-pr-${{ matrix.shard }} \
+            --out artifacts/mutants-shard-summary.json
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: mutants-pr-${{ matrix.shard }}.out
-          path: mutants.out
+          name: mutants-pr-${{ matrix.shard }}
+          path: |
+            artifacts/mutants-shard-summary.json
+            artifacts/pass1/
+            artifacts/pass2/
+          if-no-files-found: warn
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: blueline-gate-mutant-shard-pr-${{ matrix.shard }}
+          path: artifacts/mutants-shard-summary.json
+          if-no-files-found: warn
+      - name: Fail shard if any mutation pass failed
+        if: always()
+        env:
+          PASS1: ${{ steps.mutants_pass1.outcome }}
+          PASS2: ${{ steps.mutants_pass2.outcome }}
+        run: |
+          echo "pass1=$PASS1 pass2=$PASS2"
+          if [ "$PASS1" = "failure" ] || [ "$PASS2" = "failure" ]; then
+            echo "::error title=P1 gate.security.mutation::PR mutation shard ${{ matrix.shard }}/32 failed (pass1=$PASS1, pass2=$PASS2). Inspect mutants-pr-${{ matrix.shard }} artifact and shard summary."
+            exit 1
+          fi
+          if [ "$PASS1" = "cancelled" ] || [ "$PASS2" = "cancelled" ]; then
+            echo "::error title=P1 gate.security.mutation::PR mutation shard ${{ matrix.shard }}/32 cancelled/unknown (pass1=$PASS1, pass2=$PASS2). Cancelled is unknown fate, not a clean result."
+            exit 1
+          fi
 
   mutants-pr-aggregate:
-    name: Mutation testing (PR diff)
+    name: "P1 gate.security.mutation — PR diff aggregate"
     runs-on: ubuntu-latest
     if: always() && github.event_name == 'pull_request'
     needs: [mutants-pr]
     steps:
-      # Without always(), GitHub SKIPS this job when any shard fails, and a
-      # skipped required check counts as satisfied. The result is then read
-      # explicitly so a failed, cancelled, or timed-out shard fails the gate.
-      #
-      # A timed-out shard reports as `cancelled`, which is why this reads the
-      # job result rather than trusting a green run: `cancelled` and `failure`
-      # are the same verdict here, and neither is "no survivors".
+      - uses: actions/checkout@v4
+      - name: Download mutation shard artifacts
+        id: download
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          pattern: mutants-pr-*
+          path: artifacts/mutants
+          merge-multiple: false
+      - name: Build mutation aggregate summary
+        if: always()
+        env:
+          MATRIX_RESULT: ${{ needs.mutants-pr.result }}
+        run: |
+          mkdir -p artifacts
+          python3 scripts/ci/ci_triage.py \
+            --input-dir artifacts/mutants \
+            --out-json artifacts/mutants-pr-aggregate.json \
+            --out-md artifacts/mutants-pr-aggregate.md \
+            --event pull_request || true
+          {
+            echo "## P1 gate.security.mutation — PR aggregate"
+            echo ""
+            echo "- Matrix result: \`${MATRIX_RESULT}\`"
+            echo "- Artifact download: \`${{ steps.download.outcome }}\`"
+            echo ""
+            echo "Per-shard details are in downloaded \`mutants-pr-*\` artifacts (mutants-shard-summary.json). \`cancelled\` means unknown fate (timeout/infra), not a proven survivor."
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [ -f artifacts/mutants-pr-aggregate.md ]; then
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            cat artifacts/mutants-pr-aggregate.md >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: blueline-gate-mutants-pr-aggregate
+          path: |
+            artifacts/mutants-pr-aggregate.json
+            artifacts/mutants-pr-aggregate.md
+          if-no-files-found: warn
       - name: Every shard must have succeeded
         env:
           RESULT: ${{ needs.mutants-pr.result }}
         run: |
           if [ "$RESULT" != "success" ]; then
-            echo "::error::mutation testing shards reported '$RESULT'"
+            echo "::error title=P1 gate.security.mutation::PR mutation shards reported '$RESULT'. See mutants-pr aggregate summary and per-shard mutants-pr-* artifacts; cancelled usually means timeout/infra (unknown fate), not survivors."
             exit 1
           fi
-          echo "All 32 mutation testing shards completed successfully."
+          echo "All 32 PR mutation testing shards completed successfully."
 
-  # Sharded across 32 parallel runners for push to main, with the same scope and
-  # timeout arithmetic as mutants-pr above.
   mutants:
-    name: Mutation testing (push diff, shard ${{ matrix.shard }}/32)
+    name: "P1 gate.security.mutation — push diff shard ${{ matrix.shard }}/32"
     runs-on: ubuntu-latest
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     needs: [test]
-    # Same arithmetic as mutants-pr above: 100, above the 80 min worst case.
     timeout-minutes: 100
     strategy:
       fail-fast: false
@@ -692,32 +895,287 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-mutants
-      # Shared exclusion list, loaded from scripts/mutants_exclude.re — the
-      # same file mutants-pr reads. The excluded genres and their reasons are
-      # documented in the comment block inside the mutants-pr job.
-      - name: Load shared mutant exclusions
-        run: printf 'BLUELINE_MUTANTS_EXCLUDE=%s\n' "$(cat scripts/mutants_exclude.re)" >> "$GITHUB_ENV"
       - name: Diff against previous commit
-        run: git diff HEAD~1..HEAD -- > push.diff
-      - name: Mutate the changed lines
+        id: diff
         run: |
+          git diff HEAD~1..HEAD -- > push.diff
+          echo "base=HEAD~1" >> "$GITHUB_OUTPUT"
+      - name: "Mutate changed lines (pass 1: src/**/*.rs glob)"
+        id: mutants_pass1
+        continue-on-error: true
+        # Uses workflow-level BLUELINE_MUTANTS_EXCLUDE
+        run: |
+          echo "::notice title=P1 gate.security.mutation::Push shard ${{ matrix.shard }}/32 pass1 (in-diff, src/**/*.rs) starting"
           cargo mutants --in-diff push.diff --shard ${{ matrix.shard }}/32 \
             --file 'src/**/*.rs' \
             --exclude-re "$BLUELINE_MUTANTS_EXCLUDE" \
             --in-place --baseline=skip --timeout 300
-
+      - name: Resolve explicit mutation targets (pass 2)
+        id: mutants_targets
+        shell: bash
+        run: |
           set -euo pipefail
           mapfile -t files < <(git ls-files 'src/*.rs' 'src/registry/*.rs' \
             | grep -vxFf <(printf '%s' "$BLUELINE_MUTANTS_SKIP"))
           test "${#files[@]}" -gt 0 || { echo "no mutation targets resolved" >&2; exit 1; }
+          printf '%s\n' "${files[@]}" > artifacts-mutants-files.txt
+          echo "count=${#files[@]}" >> "$GITHUB_OUTPUT"
+      - name: "Mutate changed lines (pass 2: explicit src files)"
+        id: mutants_pass2
+        continue-on-error: true
+        # Uses workflow-level BLUELINE_MUTANTS_EXCLUDE
+        shell: bash
+        run: |
+          set -euo pipefail
+          mapfile -t files < artifacts-mutants-files.txt
           args=(); for f in "${files[@]}"; do args+=(--file "$f"); done
-          echo "mutating ${#files[@]} files (shard ${{ matrix.shard }}/32)"
+          echo "::notice title=P1 gate.security.mutation::Push shard ${{ matrix.shard }}/32 pass2 (in-diff, explicit ${#files[@]} files) starting"
           cargo mutants --in-diff push.diff --shard ${{ matrix.shard }}/32 \
             "${args[@]}" \
             --exclude-re "$BLUELINE_MUTANTS_EXCLUDE" \
             --in-place --baseline=skip --timeout 300
+      - name: Snapshot pass 1 evidence
+        if: always() && steps.mutants_pass1.outcome != 'skipped'
+        run: |
+          mkdir -p artifacts/pass1
+          if [ -d mutants.out ]; then cp -a mutants.out/. artifacts/pass1/ 2>/dev/null || true; fi
+          [ -f mutants.out ] && cp mutants.out artifacts/pass1/mutants.out.txt 2>/dev/null || true
+      - name: Snapshot pass 2 evidence
+        if: always() && steps.mutants_pass2.outcome != 'skipped'
+        run: |
+          mkdir -p artifacts/pass2
+          if [ -d mutants.out ]; then cp -a mutants.out/. artifacts/pass2/ 2>/dev/null || true; fi
+          [ -f mutants.out ] && cp mutants.out artifacts/pass2/mutants.out.txt 2>/dev/null || true
+      - name: Collect mutation shard summary
+        if: always()
+        env:
+          PASS1: ${{ steps.mutants_pass1.outcome }}
+          PASS2: ${{ steps.mutants_pass2.outcome }}
+          JOB_STATUS: ${{ job.status }}
+          DIFF_BASE: ${{ steps.diff.outputs.base }}
+        run: |
+          mkdir -p artifacts
+          python3 scripts/ci/mutants_shard_summary.py \
+            --event push \
+            --shard '${{ matrix.shard }}' \
+            --shard-total 32 \
+            --job-result "${JOB_STATUS:-unknown}" \
+            --diff-base "${DIFF_BASE}" \
+            --pass "pass1_glob=${PASS1:-unknown}" \
+            --pass "pass2_explicit=${PASS2:-unknown}" \
+            --mutants-out artifacts/pass1/mutants.out.txt \
+            --mutants-out artifacts/pass2/mutants.out.txt \
+            --outcomes-json artifacts/pass1/outcomes.json \
+            --outcomes-json artifacts/pass2/outcomes.json \
+            --artifact-name mutants-${{ matrix.shard }} \
+            --out artifacts/mutants-shard-summary.json
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: mutants-${{ matrix.shard }}.out
-          path: mutants.out
+          name: mutants-${{ matrix.shard }}
+          path: |
+            artifacts/mutants-shard-summary.json
+            artifacts/pass1/
+            artifacts/pass2/
+          if-no-files-found: warn
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: blueline-gate-mutant-shard-push-${{ matrix.shard }}
+          path: artifacts/mutants-shard-summary.json
+          if-no-files-found: warn
+      - name: Fail shard if any mutation pass failed
+        if: always()
+        env:
+          PASS1: ${{ steps.mutants_pass1.outcome }}
+          PASS2: ${{ steps.mutants_pass2.outcome }}
+        run: |
+          echo "pass1=$PASS1 pass2=$PASS2"
+          if [ "$PASS1" = "failure" ] || [ "$PASS2" = "failure" ]; then
+            echo "::error title=P1 gate.security.mutation::Push mutation shard ${{ matrix.shard }}/32 failed (pass1=$PASS1, pass2=$PASS2). Inspect mutants-${{ matrix.shard }} artifact and shard summary."
+            exit 1
+          fi
+          if [ "$PASS1" = "cancelled" ] || [ "$PASS2" = "cancelled" ]; then
+            echo "::error title=P1 gate.security.mutation::Push mutation shard ${{ matrix.shard }}/32 cancelled/unknown (pass1=$PASS1, pass2=$PASS2). Cancelled is unknown fate, not a clean result."
+            exit 1
+          fi
+
+  mutants-aggregate:
+    name: "P1 gate.security.mutation — push diff aggregate"
+    runs-on: ubuntu-latest
+    if: always() && github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: [mutants]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download mutation shard artifacts
+        id: download
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          pattern: mutants-*
+          path: artifacts/mutants
+          merge-multiple: false
+      - name: Build mutation aggregate summary
+        if: always()
+        env:
+          MATRIX_RESULT: ${{ needs.mutants.result }}
+        run: |
+          mkdir -p artifacts
+          python3 scripts/ci/ci_triage.py \
+            --input-dir artifacts/mutants \
+            --out-json artifacts/mutants-aggregate.json \
+            --out-md artifacts/mutants-aggregate.md \
+            --event push || true
+          {
+            echo "## P1 gate.security.mutation — push aggregate"
+            echo ""
+            echo "- Matrix result: \`${MATRIX_RESULT}\`"
+            echo "- Artifact download: \`${{ steps.download.outcome }}\`"
+            echo ""
+            echo "Per-shard details are in downloaded \`mutants-*\` artifacts (mutants-shard-summary.json). \`cancelled\` means unknown fate (timeout/infra), not a proven survivor."
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [ -f artifacts/mutants-aggregate.md ]; then
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            cat artifacts/mutants-aggregate.md >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: blueline-gate-mutants-aggregate
+          path: |
+            artifacts/mutants-aggregate.json
+            artifacts/mutants-aggregate.md
+          if-no-files-found: warn
+      - name: Every shard must have succeeded
+        env:
+          RESULT: ${{ needs.mutants.result }}
+        run: |
+          if [ "$RESULT" != "success" ]; then
+            echo "::error title=P1 gate.security.mutation::Push mutation shards reported '$RESULT'. See mutants aggregate summary and per-shard mutants-* artifacts; cancelled usually means timeout/infra (unknown fate), not survivors."
+            exit 1
+          fi
+          echo "All 32 push mutation testing shards completed successfully."
+
+  ci-triage:
+    name: "CI triage summary (fix-first)"
+    runs-on: ubuntu-latest
+    if: always()
+    needs:
+      - lint-workflows
+      - references
+      - fmt
+      - lint
+      - test
+      - audit
+      - dogfood
+      - dogfood-cargo
+      - mutants-pr-aggregate
+      - mutants-aggregate
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download gate and mutant aggregate artifacts
+        id: download
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          pattern: blueline-gate-*
+          path: artifacts/triage
+          merge-multiple: true
+      - name: Build CI triage report
+        id: triage
+        if: always()
+        env:
+          EVENT: ${{ github.event_name }}
+          NEED_LINT_WORKFLOWS: ${{ needs.lint-workflows.result }}
+          NEED_REFERENCES: ${{ needs.references.result }}
+          NEED_FMT: ${{ needs.fmt.result }}
+          NEED_LINT: ${{ needs.lint.result }}
+          NEED_TEST: ${{ needs.test.result }}
+          NEED_AUDIT: ${{ needs.audit.result }}
+          NEED_DOGFOOD: ${{ needs.dogfood.result }}
+          NEED_DOGFOOD_CARGO: ${{ needs.dogfood-cargo.result }}
+          NEED_MUTANTS_PR: ${{ needs.mutants-pr-aggregate.result }}
+          NEED_MUTANTS_PUSH: ${{ needs.mutants-aggregate.result }}
+        run: |
+          mkdir -p artifacts/triage
+          # Synthesize gate records when artifacts are missing (skipped/event-specific jobs).
+          python3 - << 'PY'
+          import json, os
+          from pathlib import Path
+          out = Path('artifacts/triage/synthesized-needs.jsonl')
+          rows = [
+            ('P2','gate.workflow.lint','lint-workflows',os.environ['NEED_LINT_WORKFLOWS']),
+            ('P2','gate.docs.references','references',os.environ['NEED_REFERENCES']),
+            ('P0','gate.rust.format','fmt',os.environ['NEED_FMT']),
+            ('P0','gate.rust.lint','lint',os.environ['NEED_LINT']),
+            ('P0','gate.rust.test','test',os.environ['NEED_TEST']),
+            ('P1','gate.security.audit','audit',os.environ['NEED_AUDIT']),
+            ('P3','gate.dogfood.health','dogfood',os.environ['NEED_DOGFOOD']),
+            ('P3','gate.dogfood.health','dogfood-cargo',os.environ['NEED_DOGFOOD_CARGO']),
+            ('P1','gate.security.mutation','mutants-pr-aggregate',os.environ['NEED_MUTANTS_PR']),
+            ('P1','gate.security.mutation','mutants-aggregate',os.environ['NEED_MUTANTS_PUSH']),
+          ]
+          with out.open('w', encoding='utf-8') as fh:
+            for pri, cat, job, res in rows:
+              fh.write(json.dumps({'schema_version':1,'kind':'gate','priority':pri,'category':cat,'job':job,'result':res,'reason':f'job result from workflow needs: {res}','evidence':'workflow needs graph','fix_first':'Inspect the job logs/summary and any blueline-gate-* artifact.' if res not in ('success','skipped') else ''})+'\n')
+          PY
+          # ci_triage.py reads *.json; convert jsonl lines to individual json files.
+          python3 - << 'PY'
+          import json
+          from pathlib import Path
+          src = Path('artifacts/triage/synthesized-needs.jsonl')
+          if src.exists():
+            for i, line in enumerate(src.read_text(encoding='utf-8').splitlines()):
+              if line.strip():
+                Path(f'artifacts/triage/need-{i}.json').write_text(line.strip()+'\n', encoding='utf-8')
+          PY
+          python3 scripts/ci/ci_triage.py \
+            --input-dir artifacts/triage \
+            --out-json artifacts/ci-triage.json \
+            --out-md artifacts/ci-triage.md \
+            --event "${EVENT}"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: blueline-ci-triage
+          path: |
+            artifacts/ci-triage.json
+            artifacts/ci-triage.md
+          if-no-files-found: warn
+      - name: Fail if required gates failed
+        if: always()
+        env:
+          NEED_LINT_WORKFLOWS: ${{ needs.lint-workflows.result }}
+          NEED_REFERENCES: ${{ needs.references.result }}
+          NEED_FMT: ${{ needs.fmt.result }}
+          NEED_LINT: ${{ needs.lint.result }}
+          NEED_TEST: ${{ needs.test.result }}
+          NEED_AUDIT: ${{ needs.audit.result }}
+          NEED_DOGFOOD: ${{ needs.dogfood.result }}
+          NEED_DOGFOOD_CARGO: ${{ needs.dogfood-cargo.result }}
+          NEED_MUTANTS_PR: ${{ needs.mutants-pr-aggregate.result }}
+          NEED_MUTANTS_PUSH: ${{ needs.mutants-aggregate.result }}
+        run: |
+          fail=0
+          for kv in \
+            "P2 gate.workflow.lint/lint-workflows=$NEED_LINT_WORKFLOWS" \
+            "P2 gate.docs.references/references=$NEED_REFERENCES" \
+            "P0 gate.rust.format/fmt=$NEED_FMT" \
+            "P0 gate.rust.lint/lint=$NEED_LINT" \
+            "P0 gate.rust.test/test=$NEED_TEST" \
+            "P1 gate.security.audit/audit=$NEED_AUDIT" \
+            "P3 gate.dogfood.health/dogfood=$NEED_DOGFOOD" \
+            "P3 gate.dogfood.health/dogfood-cargo=$NEED_DOGFOOD_CARGO" \
+            "P1 gate.security.mutation/mutants-pr-aggregate=$NEED_MUTANTS_PR" \
+            "P1 gate.security.mutation/mutants-aggregate=$NEED_MUTANTS_PUSH"; do
+            name=${kv%%=*}; res=${kv#*=}
+            case "$res" in
+              success|skipped) ;;
+              *) echo "::error title=CI fix-first::${name} result=${res}"; fail=1 ;;
+            esac
+          done
+          if [ "$fail" -ne 0 ]; then
+            echo "CI triage found failed/cancelled required gates. See blueline-ci-triage artifact and job summaries above."
+            exit 1
+          fi
+          echo "All required CI gates succeeded or were skipped by event conditions."

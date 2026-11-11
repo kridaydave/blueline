@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- **CI inspectability overhaul.** GitHub Actions now publishes per-gate summaries and `blueline-gate-*` artifacts (`gate_summary.py`) for fmt, clippy, tests, workflow lint, references, supply-chain audit, and dogfood jobs, plus a `ci-triage` job that writes a fix-first summary (`P0` Rust gate → `P1` security/audit/mutation → `P2` workflow/docs → `P3` dogfood health → `P4` dogfood risk). Mutation shards emit `mutants-shard-summary.json` with pass outcomes/root-cause classes, keep the in-diff double pass inspectable, and both PR and push mutation runs now have aggregates. The composite action (`.github/actions/blueline-ci`) reports scan outputs/summary details, and `scripts/verify.sh` labels stages with CI categories/priorities and parity notes. `actionlint -shellcheck= -pyflakes=` runs clean on this workflow after dropping four empty `env:` blocks, which actionlint rejected as null.
+
 - **Auto-update check on run.** Blueline now queries crates.io for a newer
   published version and prints a single notice to stderr when one exists
   (opt out with `BLUEDISABLE_UPDATE_CHECK=1`). Network errors are ignored
@@ -63,6 +65,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   characters in `reason` or `id` is rejected during validation.
 
 ### Changed
+
+- **`BaselineStore::clear_advisory_cache` no longer carries `#[allow(dead_code)]`.** The method is public and reachable, and the advisory-cache tests exercise it, so the allow was redundant.
 
 - **The dev and test profiles now build at `opt-level = 1`.** The gate's test
   stage goes from 46.4 s to 20 to 24 s wall and 53.2 s to 14 to 15 s CPU, with

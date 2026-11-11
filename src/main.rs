@@ -124,6 +124,14 @@ fn check_for_update() {
     if std::env::var("BLUEDISABLE_UPDATE_CHECK").is_ok() {
         return;
     }
+    // Integration tests and CI spawn the binary; skip the network check when
+    // stderr is not a terminal or when a test hook points us elsewhere.
+    if std::env::var_os("BLUELINE_TEST_URL").is_some() {
+        return;
+    }
+    if !std::io::IsTerminal::is_terminal(&std::io::stderr()) {
+        return;
+    }
     let agent = ureq::AgentBuilder::new()
         .timeout(std::time::Duration::from_secs(2))
         .build();
