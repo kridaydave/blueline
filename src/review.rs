@@ -1313,7 +1313,6 @@ fn package_json_path(root: &std::path::Path) -> std::path::PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::has_finding;
 
     fn hint_verdict(findings: Vec<crate::verdict::Finding>) -> crate::verdict::Verdict {
         crate::verdict::Verdict {
