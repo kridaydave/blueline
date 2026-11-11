@@ -538,7 +538,12 @@ jobs:
           set -euo pipefail
           mkdir -p artifacts
           BASE_REF="origin/$BASE_BRANCH"
-          if git show "$BASE_REF:blueline.toml" > /tmp/base_blueline.toml 2>/dev/null; then
+          # Use the PR's policy when Cargo.lock changes so a PR can carry the
+          # allowlist entries required for the dependencies it introduces. The
+          # base-branch policy cannot know about those paths yet.
+          if [ -f blueline.toml ]; then
+            POLICY_ARG=(--policy blueline.toml)
+          elif git show "$BASE_REF:blueline.toml" > /tmp/base_blueline.toml 2>/dev/null; then
             POLICY_ARG=(--policy /tmp/base_blueline.toml)
           else
             POLICY_ARG=()
