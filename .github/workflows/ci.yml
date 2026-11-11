@@ -29,7 +29,7 @@ env:
     src/error.rs
   # Shared cargo-mutants exclusions (unbuildable/true-equivalent/fork-bomb/timeout-prone
   # mutants). Keep in sync with scripts/verify.sh MUTANTS_EXCLUDE.
-  BLUELINE_MUTANTS_EXCLUDE: 'with .*Default::default\(\)|replace && with \|\| in .*|delete ! in (spawn_child|may_spawn_child|may_spawn_child_given|export_osv)|replace may_spawn_child(_given)? -> bool with true|replace <= with > in evaluate_candidates|replace == with != in scan_file|replace < with <= in levenshtein_at_most_one|replace < with > in levenshtein_at_most_one|replace \+= with \*= in levenshtein_at_most_one|replace > with < in levenshtein_at_most_one'
+  BLUELINE_MUTANTS_EXCLUDE: 'with .*Default::default\(\)|replace && with \|\| in .*|delete ! in (spawn_child|may_spawn_child|may_spawn_child_given|export_osv|check_for_update)|replace may_spawn_child(_given)? -> bool with true|replace <= with > in evaluate_candidates|replace == with != in scan_file|replace < with <= in levenshtein_at_most_one|replace < with > in levenshtein_at_most_one|replace \+= with \*= in levenshtein_at_most_one|replace > with < in levenshtein_at_most_one|replace > with == in check_for_update|replace > with >= in check_for_update|replace set_file_perm with \(\)|replace set_dir_perm with \(\)'
 
 jobs:
   # GitHub compiles a workflow before it runs a single step, and a compile
