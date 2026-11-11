@@ -1231,6 +1231,31 @@ mod tests {
         let vector_high = "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:N/A:N";
         let score_high = parse_cvss_vector(vector_high).unwrap();
         assert_eq!(score_high, 6.5);
+
+        // Low impact (C/I/A = L) must be parsed distinctly from None/other values.
+        let low_impact = "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:L/A:N";
+        assert_eq!(parse_cvss_vector(low_impact), Some(6.5));
+
+        // Scope changed (S:C) changes PR weights and score; must not be treated as unchanged.
+        let scope_changed = "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:C/C:H/I:H/A:H";
+        assert_eq!(parse_cvss_vector(scope_changed), Some(9.9));
+    }
+
+    #[test]
+    fn cvss_v3_scope_and_attack_complexity_metrics_are_distinguished() {
+        // S:C changes scope-sensitive privilege weights and the base score.
+        let unchanged = parse_cvss_vector("CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:H").unwrap();
+        let changed = parse_cvss_vector("CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:C/C:H/I:H/A:H").unwrap();
+        assert_eq!(unchanged, 8.8);
+        assert_eq!(changed, 9.9);
+
+        // AC:L and AC:H must not be treated the same.
+        let low_complexity =
+            parse_cvss_vector("CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N").unwrap();
+        let high_complexity =
+            parse_cvss_vector("CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:U/C:H/I:N/A:N").unwrap();
+        assert_eq!(low_complexity, 7.5);
+        assert_eq!(high_complexity, 5.9);
     }
 
     /// Every vector here is one the NVD CVSS v2 calculator publishes a base
