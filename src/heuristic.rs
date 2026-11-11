@@ -283,9 +283,14 @@ pub fn evaluate_with_trust(
     // R02: Opaque oversized files added/modified
     for file in &delta.files_added {
         if file.kind == FileKind::OpaqueTooLarge {
+            let severity = if policy.allows_new_binary(name, ecosystem, &file.relative_path) {
+                VerdictBand::Low
+            } else {
+                VerdictBand::High
+            };
             findings.push(Finding {
                 rule_id: "R02_OPAQUE_LARGE_FILE_ADDED".into(),
-                severity: VerdictBand::High,
+                severity,
                 title: format!("Opaque oversized file added: `{}`", file.relative_path),
                 description: format!(
                     "File `{}` exceeds the diff inspection cap and cannot be inspected as text.",
@@ -296,9 +301,14 @@ pub fn evaluate_with_trust(
     }
     for file in &delta.files_modified {
         if file.kind == FileKind::OpaqueTooLarge {
+            let severity = if policy.allows_new_binary(name, ecosystem, &file.relative_path) {
+                VerdictBand::Low
+            } else {
+                VerdictBand::High
+            };
             findings.push(Finding {
                 rule_id: "R02_OPAQUE_LARGE_FILE_ADDED".into(),
-                severity: VerdictBand::High,
+                severity,
                 title: format!("Opaque oversized file modified: `{}`", file.relative_path),
                 description: format!(
                     "File `{}` exceeds the diff inspection cap and cannot be inspected as text.",
