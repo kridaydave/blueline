@@ -63,13 +63,11 @@ If a release exceeds risk thresholds, Blueline blocks the install and halts the 
 
 ## Quickstart
 
-Clone the repository and build the release binary:
+Install from crates.io, then run a review:
 
 ```bash
-git clone https://github.com/Epoch-AI-Lab/blueline.git
-cd blueline
-cargo build --release
-./target/release/blueline review express@4.21.2
+cargo install blueline
+blueline review express@4.21.2
 ```
 
 A first review has no approved baseline, so it is refused and points at the
@@ -88,6 +86,15 @@ blueline review express@4.21.2 --policy blueline.toml --yes
 
 The flag only clears the missing-baseline finding. Every content heuristic still
 applies, so a package with a new install script or a bad advisory still blocks.
+
+To build from source instead (for contributors):
+
+```bash
+git clone https://github.com/Epoch-AI-Lab/blueline.git
+cd blueline
+cargo build --release
+./target/release/blueline review express@4.21.2
+```
 
 ## AUR
 

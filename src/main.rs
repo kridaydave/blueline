@@ -18,6 +18,8 @@ fn main() {
         std::process::exit(code);
     }
 
+    check_for_update();
+
     if let Err(e) = run() {
         eprintln!("error: {e:#}");
         std::process::exit(1);
@@ -112,5 +114,55 @@ fn run() -> anyhow::Result<()> {
                 shim::uninstall(&managers, dir.as_deref())
             }
         },
+    }
+}
+
+fn check_for_update() {
+    if cfg!(test) {
+        return;
+    }
+    if std::env::var("BLUEDISABLE_UPDATE_CHECK").is_ok() {
+        return;
+    }
+    // Integration tests and CI spawn the binary; skip the network check when
+    // stderr is not a terminal or when a test hook points us elsewhere.
+    if std::env::var_os("BLUELINE_TEST_URL").is_some() {
+        return;
+    }
+    if !std::io::IsTerminal::is_terminal(&std::io::stderr()) {
+        return;
+    }
+    let agent = ureq::AgentBuilder::new()
+        .timeout(std::time::Duration::from_secs(2))
+        .build();
+    let resp = match agent.get("https://crates.io/api/v1/crates/blueline").call() {
+        Ok(r) => r,
+        Err(_) => return,
+    };
+    let body = match resp.into_string() {
+        Ok(s) => s,
+        Err(_) => return,
+    };
+    let json: serde_json::Value = match serde_json::from_str(&body) {
+        Ok(v) => v,
+        Err(_) => return,
+    };
+    let latest = match json
+        .get("crate")
+        .and_then(|c| c.get("max_version"))
+        .and_then(|v| v.as_str())
+    {
+        Some(s) => s,
+        None => return,
+    };
+    let current = env!("CARGO_PKG_VERSION");
+    if let (Ok(latest_v), Ok(current_v)) = (
+        semver::Version::parse(latest),
+        semver::Version::parse(current),
+    ) && latest_v > current_v
+    {
+        eprintln!(
+            "blueline: a newer version ({latest}) is available; run `cargo install blueline` to update"
+        );
     }
 }
