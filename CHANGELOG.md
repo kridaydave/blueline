@@ -41,7 +41,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
-<<<<<<< HEAD
 - **PEP 440 parses whose canonical form exceeds 256 bytes are rejected.** Inputs
   longer than 256 bytes were already refused; normalization can canonicalize a
   shorter input into a longer one (`c` reads as `rc`, a bare `r<n>` reads as
@@ -53,7 +52,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   for the same reason before any `enclosed_name` sanitization can hide it.
 
 - **Gate four integration tests on Unix so the cross-platform test matrix passes on Windows.** `recall_export_osv_refuses_symlink_out`, `install_delegates_to_npm_with_ignore_scripts`, `shim_installs_gates_and_uninstalls` and `shim_fails_closed_when_the_baked_blueline_binary_is_missing` either create or execute on-disk `#!/bin/sh` scripts / symlinks that Windows cannot create or exec, so they now run only on Unix like the other platform-specific tests in the suite.
-=======
+
 - **Blocklist and binary-allowance glob patterns with unsupported `*` placement now fail at load.**
   Interior or multi-star shapes that `glob_match` cannot interpret (e.g.
   `evil-*-pkg`) are refused when the policy loads, naming the pattern and the
@@ -61,7 +60,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   silently-ignored blocklist glob is a fail-open control
   (`policy::tests::blocklist_glob_interior_star_is_rejected_at_load`,
   `policy::tests::allowed_new_binary_paths_rejects_unsupported_glob`).
->>>>>>> 54a85fb (Reject unsupported glob patterns in policy at load)
 
 - **Active provenance controls no longer stay inert on Cargo and AUR lanes.**
   When `require_provenance`, `allowed_repositories`, or `allowed_builders` is
