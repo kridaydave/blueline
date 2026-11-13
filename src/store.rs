@@ -1715,6 +1715,39 @@ mod tests {
     }
 
     #[test]
+    fn provenance_cache_ttl_is_seven_days() {
+        // The TTL is what bounds how long a provenance row can stand in for a
+        // live registry check. Pin it to a literal so an arithmetic change to
+        // the constant (7 * 24 * 60 * 60) is caught, not re-derived.
+        let dir = tempfile::tempdir().unwrap();
+        let store = BaselineStore::open_at(&dir.path().join("t.db")).unwrap();
+        store
+            .record_provenance(
+                Ecosystem::Npm,
+                "pkg",
+                "1.0.0",
+                "sha512:deadbeef",
+                Some("https://github.com/actions/runner"),
+                Some("https://github.com/org/repo"),
+                Some("abc123sha"),
+                Some(".github/workflows/release.yml"),
+                3,
+                true,
+            )
+            .unwrap();
+        let prov = store
+            .get_cached_provenance(Ecosystem::Npm, "pkg", "1.0.0")
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            prov.expires_at - prov.verified_at,
+            604_800,
+            "the provenance cache TTL must stay 7 days"
+        );
+        assert!(!prov.is_expired, "a fresh row must not read as expired");
+    }
+
+    #[test]
     fn provenance_cache_roundtrip() {
         let dir = tempfile::tempdir().unwrap();
         let store = BaselineStore::open_at(&dir.path().join("t.db")).unwrap();

@@ -1213,6 +1213,33 @@ mod tests {
     }
 
     #[test]
+    fn v1_recursion_depth_boundary_is_exact() {
+        // A chain whose deepest walk runs at exactly MAX_LOCKFILE_RECURSION_DEPTH
+        // must still parse: the limit refuses `depth > 32`, not `depth >= 32`.
+        // Off-by-one in either direction would refuse a lockfile npm accepts.
+        let chain = |levels: usize| {
+            let mut curr = serde_json::json!({ "version": "1.0.0" });
+            for i in 0..levels {
+                curr = serde_json::json!({
+                    "version": "1.0.0",
+                    "dependencies": { format!("dep-{}", i): curr }
+                });
+            }
+            serde_json::to_string(&serde_json::json!({
+                "lockfileVersion": 1,
+                "dependencies": { "dep-root": curr }
+            }))
+            .unwrap()
+        };
+        assert!(parse_lockfile_packages(&chain(32)).is_ok());
+        let err = parse_lockfile_packages(&chain(33)).unwrap_err();
+        assert!(
+            err.to_string().contains("depth"),
+            "one level past the limit must be refused: {err}"
+        );
+    }
+
+    #[test]
     fn v1_missing_version_is_refused() {
         let json = r#"{
             "lockfileVersion": 1,

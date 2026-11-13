@@ -1512,6 +1512,92 @@ mod tests {
     }
 
     #[test]
+    fn provenance_cache_hit_with_different_digest_reverifies_pypi() {
+        let cached_digest = ck("cached");
+        let reviewed_digest = ck("different");
+        let dir = tempfile::tempdir().unwrap();
+        let store = BaselineStore::open_at(&dir.path().join("blueline.db")).unwrap();
+        store
+            .record_provenance(
+                Ecosystem::PyPi,
+                "requests",
+                "2.31.0",
+                &format!("{}:{}", cached_digest.alg.name(), cached_digest.value_hex),
+                Some("https://github.com/actions/runner"),
+                Some("https://github.com/psf/requests"),
+                Some("deadbeef"),
+                Some(".github/workflows/w.yml"),
+                3,
+                false,
+            )
+            .unwrap();
+
+        // 404 means no attestation exists; if the digest-mismatched cache row
+        // were trusted we would return Attested instead.
+        let server = provenance_status_server("HTTP/1.1 404 Not Found", "{}");
+        let report = inspect_provenance_pypi(
+            "requests",
+            "2.31.0",
+            "requests-2.31.0-py3-none-any.whl",
+            &reviewed_digest,
+            &server,
+            Some(&store),
+            &Policy::default(),
+        );
+        assert_eq!(
+            report.status,
+            ProvenanceStatus::Missing,
+            "a digest-mismatched pypi cache row must not be trusted: {report:?}"
+        );
+    }
+
+    #[test]
+    fn stale_provenance_cache_row_reverifies_pypi() {
+        let digest = ck("same");
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("blueline.db");
+        let store = BaselineStore::open_at(&db).unwrap();
+        let digest_str = format!("{}:{}", digest.alg.name(), digest.value_hex);
+        store
+            .record_provenance(
+                Ecosystem::PyPi,
+                "requests",
+                "2.31.0",
+                &digest_str,
+                Some("https://github.com/actions/runner"),
+                Some("https://github.com/psf/requests"),
+                Some("deadbeef"),
+                Some(".github/workflows/w.yml"),
+                3,
+                false,
+            )
+            .unwrap();
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        conn.execute(
+            "UPDATE provenance_cache SET verified_at = 1, expires_at = 1
+             WHERE ecosystem = 'pypi' AND package = 'requests' AND version = '2.31.0'",
+            [],
+        )
+        .unwrap();
+
+        let server = provenance_status_server("HTTP/1.1 404 Not Found", "{}");
+        let report = inspect_provenance_pypi(
+            "requests",
+            "2.31.0",
+            "requests-2.31.0-py3-none-any.whl",
+            &digest,
+            &server,
+            Some(&store),
+            &Policy::default(),
+        );
+        assert_eq!(
+            report.status,
+            ProvenanceStatus::Missing,
+            "an expired pypi cache row must not be trusted: {report:?}"
+        );
+    }
+
+    #[test]
     fn provenance_cache_happy_hit_still_works_npm() {
         let digest = ck("same");
         let dir = tempfile::tempdir().unwrap();

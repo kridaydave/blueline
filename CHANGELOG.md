@@ -287,7 +287,21 @@ Targeted at 0.4.0. This release is a behaviour change for anyone who set
   output) is excluded in CI with a documented reason. A fourth exclusion
   (`>` to `<` in `levenshtein_at_most_one`) joins them: the flipped guard
   is never taken, and the scan advances one index past the point where it
-  can match, so the shard times out instead of producing a verdict.
+  can match, so the shard times out instead of producing a verdict. A
+  fifth (`<` to `<=` in `is_repo_allowed::split_host_path`) is likewise
+  equivalent: the colon and the slash index distinct bytes of one string,
+  so the two positions can never be equal.
+
+- **The trust-fix sweep's own mutants are killed.** The PR-diff mutation
+  gate surfaced survivors in every unit this PR touches, and each now has
+  a test that fails with the mutant applied: `is_repo_allowed` boundary
+  arithmetic (colon-after-slash direction, the port staying on the host
+  side of the split, empty ports, equal-length and shorter-path indexing,
+  bare-path and host:port-junction suffix matches, scp-style colon-only
+  paths), the exact npm v1 recursion-depth boundary (32 parses, 33 is
+  refused), the pypi provenance cache refusing expired and
+  digest-mismatched rows, the seven-day provenance TTL pinned to a
+  literal, and the pip gate still requiring the `install` word.
 
 - **A review no longer waits for the advisory lookup to finish before it
   starts working.** `fetch_advisories` ran to completion inside the review,

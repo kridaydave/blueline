@@ -4307,6 +4307,58 @@ mod tests {
             "git@github.com:org/app.git",
             "github.com/org2"
         ));
+
+        // A colon after the first slash is not a port, so the host must be
+        // split at the slash. Reading it as host:port would slice backwards
+        // and panic, so this pins the guard's direction.
+        assert!(!is_repo_allowed(
+            "https://example.com/foo:1234",
+            "example.com/x"
+        ));
+
+        // A port belongs to the host, not the path: a pattern whose path
+        // starts with the port digits must not match, whatever the split
+        // arithmetic does with the colon offset.
+        assert!(!is_repo_allowed(
+            "https://github.com:443/org/app",
+            "github.com/443/org"
+        ));
+
+        // An empty port (`host:/path`) leaves the host intact — the colon
+        // stays attached to it. Here the repo path keeps its leading slash
+        // while the pattern path (`//rest`) has one too, so they line up
+        // exactly; detaching the colon would break the host match.
+        assert!(is_repo_allowed(
+            "https://github.com:/rest",
+            "github.com//rest"
+        ));
+
+        // Equal-length paths that differ must not compare past their end,
+        // and the suffix-boundary arithmetic must not index before the
+        // start of the path when lengths are equal or the pattern is
+        // longer.
+        assert!(!is_repo_allowed("https://github.com/aaa", "github.com/bbb"));
+        assert!(!is_repo_allowed("aaa", "bbb"));
+        assert!(!is_repo_allowed("ab", "abcd"));
+
+        // A bare path pattern matches at a boundary inside the repo path,
+        // and a pattern that only spans the host:port junction matches the
+        // full normalized URI. Both are what the boundary arithmetic earns.
+        assert!(is_repo_allowed("https://example.com/ab/cd", "cd"));
+        assert!(is_repo_allowed(
+            "https://example.com:8080/org/app",
+            "8080/org/app"
+        ));
+
+        // The path after a port starts strictly after the slash: it must not
+        // absorb the slash (or the port's last digit) into itself, which
+        // would let a repo path line up with a pattern it never named.
+        assert!(!is_repo_allowed("https://github.com:443/app", "/app"));
+        assert!(!is_repo_allowed("https://github.com:443/app", "3/app"));
+
+        // A colon with no slash at all is scp-style host:path; the path
+        // starts after the colon, keeping the colon on the host side.
+        assert!(is_repo_allowed("git@github.com:app", "github.com/app"));
     }
 
     #[test]

