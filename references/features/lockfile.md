@@ -33,7 +33,7 @@ short-circuits earlier.
 
 | Dialect | Map key | Notes |
 |---|---|---|
-| npm | normalized `node_modules` **path**, not name | `packages` (v2/v3) wins over `dependencies`; roots `""`/`"."` skipped; entries without `version` silently ignored |
+| npm | normalized `node_modules` **path**, not name | `packages` (v2/v3) wins over `dependencies`; roots `""`/`"."` skipped; entries without `version` are refused (v2/v3 and v1); v2/v3 paths that normalize to the same key are refused when entries differ (identical duplicates dedupe) |
 | Cargo | `cargo/{name}@{version}` | `checksum` must be exactly 64 hex → `sha256:<hex>`; `source` stored verbatim in `resolved` |
 | requirements.txt | PEP 503 canonical name | `entry.name` keeps the *original* spelling |
 
@@ -45,9 +45,10 @@ All three caps use strict `>`; each is pinned at exactly-cap and cap+1.
   exists does the absence of `lockfileVersion` produce
   `MissingField("lockfileVersion")`. `{"lockfileVersion":2,"dependencies":{…}}`
   parses as v1.
-- **npm v1 recursion silently truncates at depth 32** — `if depth > 32 { return; }`,
-  no error, no finding. `v1_recursion_depth_limit_enforced` asserts exactly
-  `MAX + 1 == 33` packages. That is a known fail-open corner.
+- **npm v1 recursion depth overflow is refused** — nesting past
+  `MAX_LOCKFILE_RECURSION_DEPTH` (32) and missing-version entries return
+  `LockfileError::InvalidData` naming the path, refusing to review a lockfile
+  whose dependency graph would otherwise be silently truncated.
 - **The npm JSON path has no size cap and no entry cap.** Only the v1 recursion
   depth is bounded.
 - **Cargo keys embed the version, so a version bump is `added` + `removed`, never
@@ -75,9 +76,9 @@ All three caps use strict `>`; each is pinned at exactly-cap and cap+1.
   excluded from that list.
 - **requirements.txt extras are stripped to the base name** for the map key and
   validated to end with `]`. `Flask` → key `flask`, `entry.name = "Flask"`.
-  Because the key is canonical, `Foo` and `foo` in one file **silently
-  overwrite** each other — there is no duplicate detection, unlike Cargo, which
-  errors on a differing duplicate.
+  Because the key is canonical, duplicate entries for one canonical name are
+  refused when their pins differ (version or integrity), naming the package;
+  case-variant identical pins (same version+integrity) dedupe to one entry.
 - **`compute_delta_from_maps` ignores `is_dev` and `resolved` in the equality
   test.** A `resolved` URL change alone is invisible. It is a single O(n)
   `BTreeMap` merge on `Ordering`, with `Equal` meaning "same map key".

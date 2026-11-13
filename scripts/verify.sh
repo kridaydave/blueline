@@ -28,7 +28,8 @@ MUTANTS_SKIP="src/lib.rs
 src/error.rs"
 # CI carries a long exclude regex for unbuildable/true-equivalent/fork-bomb
 # mutants. Local runs use the same excludes for parity when --mutants is used.
-MUTANTS_EXCLUDE='with .*Default::default\(\)|replace && with \|\| in .*|delete ! in (spawn_child|may_spawn_child|may_spawn_child_given|export_osv|check_for_update)|replace may_spawn_child(_given)? -> bool with true|replace check_for_update with \(\)|replace <= with > in evaluate_candidates|replace == with != in scan_file|replace < with <= in levenshtein_at_most_one|replace < with > in levenshtein_at_most_one|replace \+= with \*= in levenshtein_at_most_one|replace > with < in levenshtein_at_most_one|replace > with == in check_for_update|replace > with >= in check_for_update|replace > with < in check_for_update|replace set_file_perm with \(\)|replace set_dir_perm with \(\)'
+# Keep in sync with scripts/mutants_exclude.re and .github/workflows/ci.yml.
+MUTANTS_EXCLUDE='with .*Default::default\(\)|replace && with \|\| in .*|delete ! in (spawn_child|may_spawn_child|may_spawn_child_given|export_osv|check_for_update)|replace may_spawn_child(_given)? -> bool with true|replace check_for_update with \(\)|replace <= with > in evaluate_candidates|replace == with != in scan_file|replace < with <= in levenshtein_at_most_one|replace < with <= in .*split_host_path|replace < with > in levenshtein_at_most_one|replace \+= with \*= in levenshtein_at_most_one|replace > with < in levenshtein_at_most_one|replace > with == in check_for_update|replace > with >= in check_for_update|replace > with < in check_for_update|replace set_file_perm with \(\)|replace set_dir_perm with \(\)'
 
 RUN_MUTANTS=0
 RUN_FUZZ=0

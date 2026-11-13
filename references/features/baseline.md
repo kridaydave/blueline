@@ -59,9 +59,11 @@ Rule wiring: `R06_FIRST_SIGHTING` when `baseline_version.is_none()`,
 - **An all-yanked history degrades to FirstSighting but keeps
   `prior_release_yanked = true`** (`all_yanked_history_degrades_to_first_sighting_with_warning`)
   so the R08 disclosure survives the degradation.
-- **`list_clean_versions` silently skips rows whose version string fails
-  `V::parse`.** Not an error. It also sorts descending *in Rust* after an SQL
-  read with no `ORDER BY`.
+- **`list_clean_versions` fails closed on a corrupt `known_clean` row.** A
+  version string that cannot be parsed is a trust-anchor integrity error, not a
+  row to skip: the call returns `BluelineError::Store` naming the package and
+  the unparseable version (`store::tests::corrupt_known_clean_version_row_is_rejected`).
+  It sorts descending *in Rust* after an SQL read with no `ORDER BY`.
 - **`MockRegistry::list_releases` in the test module sorts by
   `Pep440Version::canonical()` regardless of the test's `V`** — a deliberate
   cross-grammar sort so semver fixtures still order correctly. Do not "fix" it.

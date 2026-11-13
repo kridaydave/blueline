@@ -121,7 +121,9 @@ const MIGRATIONS: &[&str] = &[
         workflow_path    TEXT,
         slsa_level       INTEGER NOT NULL DEFAULT 0,
         signature_valid  INTEGER NOT NULL DEFAULT 0,
+        subject_digest   TEXT NOT NULL DEFAULT '',
         verified_at      INTEGER NOT NULL,
+        expires_at       INTEGER NOT NULL DEFAULT 0,
         PRIMARY KEY (ecosystem, package, version)
     ) STRICT;
 
@@ -166,7 +168,9 @@ const EXPECTED_SCHEMA: &[(&str, &str)] = &[
     ("provenance_cache", "workflow_path"),
     ("provenance_cache", "slsa_level"),
     ("provenance_cache", "signature_valid"),
+    ("provenance_cache", "subject_digest"),
     ("provenance_cache", "verified_at"),
+    ("provenance_cache", "expires_at"),
     ("audit_log", "id"),
     ("audit_log", "package"),
     ("audit_log", "version"),
@@ -289,7 +293,10 @@ pub struct CachedProvenance {
     pub workflow_path: Option<String>,
     pub slsa_level: u32,
     pub signature_valid: bool,
+    pub subject_digest: String,
     pub verified_at: i64,
+    pub expires_at: i64,
+    pub is_expired: bool,
 }
 
 /// SQLite store for the review baseline. A row records that `name@version`
@@ -300,6 +307,12 @@ pub struct BaselineStore {
     conn: rusqlite::Connection,
     path: PathBuf,
 }
+
+/// Provenance attestations are cryptographic facts about a published release,
+/// but the cache is also keyed to the digest we verified; a stale row would skip
+/// a re-fetch that might now carry a signature the registry added later. Seven
+/// days bounds that window without making every review hit the network.
+const PROVENANCE_CACHE_TTL_SECS: i64 = 7 * 24 * 60 * 60;
 
 /// How many times the journal-mode change is retried before giving up.
 const WAL_RETRY_ATTEMPTS: u32 = 40;
@@ -456,6 +469,26 @@ impl BaselineStore {
         // by the schema itself, not by the version counter, so the migration
         // error text is only surfaced when the schema check also fails.
         let migration_error = migrations.to_latest(&mut conn).err();
+        // Idempotent upgrades for databases created before provenance cache
+        // bound rows to the verified subject digest and gave them an expiry.
+        // Ignoring "duplicate column name" makes this safe on fresh databases
+        // and on databases that already ran a migration adding the columns.
+        for sql in [
+            "ALTER TABLE provenance_cache ADD COLUMN subject_digest TEXT NOT NULL DEFAULT ''",
+            "ALTER TABLE provenance_cache ADD COLUMN expires_at INTEGER NOT NULL DEFAULT 0",
+        ] {
+            if let Err(e) = conn.execute(sql, []) {
+                let msg = e.to_string();
+                // Missing table / duplicate column: defer to schema checks or
+                // treat as already upgraded. Schema verification is the
+                // authority on what a usable store looks like.
+                if !msg.contains("duplicate column name") && !msg.contains("no such table") {
+                    return Err(BluelineError::Store(format!(
+                        "upgrading provenance cache schema: {e}"
+                    )));
+                }
+            }
+        }
         if let Err(schema_error) = verify_schema(&conn, path) {
             return Err(match migration_error {
                 Some(e) => {
@@ -631,9 +664,12 @@ impl BaselineStore {
         for row in rows {
             let (v_str, integ) = row
                 .map_err(|e| BluelineError::Store(format!("reading clean row for {name}: {e}")))?;
-            if let Ok(v) = V::parse(&v_str) {
-                versions.push((v, integ));
-            }
+            let v = V::parse(&v_str).map_err(|e| {
+                BluelineError::Store(format!(
+                    "corrupt known_clean row for {name}: unparseable version {v_str:?} ({e})"
+                ))
+            })?;
+            versions.push((v, integ));
         }
         versions.sort_by(|a, b| b.0.cmp(&a.0));
         Ok(versions)
@@ -765,12 +801,15 @@ impl BaselineStore {
     }
 
     /// Cache verified provenance and registry signatures for `package@version`.
+    ///
+    /// `subject_digest` binds the row to the artifact digest that was verified.
     #[allow(clippy::too_many_arguments)]
     pub fn record_provenance(
         &self,
         ecosystem: Ecosystem,
         package: &str,
         version: &str,
+        subject_digest: &str,
         builder_id: Option<&str>,
         source_repo: Option<&str>,
         commit_sha: Option<&str>,
@@ -782,11 +821,12 @@ impl BaselineStore {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs() as i64;
+        let expires_at = now.saturating_add(PROVENANCE_CACHE_TTL_SECS);
 
         self.conn
             .prepare_cached(
-                "INSERT INTO provenance_cache (ecosystem, package, version, builder_id, source_repo, commit_sha, workflow_path, slsa_level, signature_valid, verified_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+                "INSERT INTO provenance_cache (ecosystem, package, version, builder_id, source_repo, commit_sha, workflow_path, slsa_level, signature_valid, subject_digest, verified_at, expires_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
                  ON CONFLICT(ecosystem, package, version) DO UPDATE SET
                      builder_id = excluded.builder_id,
                      source_repo = excluded.source_repo,
@@ -794,7 +834,9 @@ impl BaselineStore {
                      workflow_path = excluded.workflow_path,
                      slsa_level = excluded.slsa_level,
                      signature_valid = excluded.signature_valid,
-                     verified_at = excluded.verified_at",
+                     subject_digest = excluded.subject_digest,
+                     verified_at = excluded.verified_at,
+                     expires_at = excluded.expires_at",
             )
             .map_err(|e| BluelineError::Store(format!("preparing record_provenance: {e}")))?
             .execute(rusqlite::params![
@@ -807,7 +849,9 @@ impl BaselineStore {
                 workflow_path,
                 slsa_level as i64,
                 if signature_valid { 1 } else { 0 },
+                subject_digest,
                 now,
+                expires_at,
             ])
             .map_err(|e| {
                 BluelineError::Store(format!("storing provenance for {package}@{version}: {e}"))
@@ -817,6 +861,9 @@ impl BaselineStore {
     }
 
     /// Retrieve cached provenance metadata for `package@version`.
+    ///
+    /// Returns the row even when expired or digest-mismatched; callers must
+    /// check `is_expired` and `subject_digest` before trusting it.
     pub fn get_cached_provenance(
         &self,
         ecosystem: Ecosystem,
@@ -824,10 +871,14 @@ impl BaselineStore {
         version: &str,
     ) -> Result<Option<CachedProvenance>, BluelineError> {
         use rusqlite::OptionalExtension;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
         let mut stmt = self
             .conn
             .prepare_cached(
-                "SELECT builder_id, source_repo, commit_sha, workflow_path, slsa_level, signature_valid, verified_at
+                "SELECT builder_id, source_repo, commit_sha, workflow_path, slsa_level, signature_valid, subject_digest, verified_at, expires_at
                  FROM provenance_cache WHERE ecosystem = ?1 AND package = ?2 AND version = ?3",
             )
             .map_err(|e| BluelineError::Store(format!("preparing get_cached_provenance: {e}")))?;
@@ -841,7 +892,9 @@ impl BaselineStore {
                 let workflow_path: Option<String> = row.get(3)?;
                 let slsa_level: i64 = row.get(4)?;
                 let signature_valid: i64 = row.get(5)?;
-                let verified_at: i64 = row.get(6)?;
+                let subject_digest: String = row.get(6)?;
+                let verified_at: i64 = row.get(7)?;
+                let expires_at: i64 = row.get(8)?;
                 Ok(CachedProvenance {
                     builder_id,
                     source_repo,
@@ -849,7 +902,10 @@ impl BaselineStore {
                     workflow_path,
                     slsa_level: slsa_level.max(0) as u32,
                     signature_valid: signature_valid != 0,
+                    subject_digest,
                     verified_at,
+                    expires_at,
+                    is_expired: now >= expires_at,
                 })
             },
         )
@@ -1511,6 +1567,38 @@ mod tests {
     }
 
     #[test]
+    fn corrupt_known_clean_version_row_is_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = BaselineStore::open_at(&dir.path().join("t.db")).unwrap();
+        let checksum = ck("good").to_sri().unwrap();
+        store
+            .conn
+            .execute(
+                "INSERT INTO known_clean (ecosystem, name, version, integrity, clean)
+                 VALUES ('npm', 'broken-pkg', 'not-a-semver!!!', ?1, 1)",
+                rusqlite::params![checksum],
+            )
+            .unwrap();
+
+        let err = store
+            .list_clean_versions::<semver::Version>(Ecosystem::Npm, "broken-pkg")
+            .expect_err("corrupt version row must be an error, not silently skipped");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("broken-pkg"),
+            "error must name the package: {msg}"
+        );
+        assert!(
+            msg.contains("not-a-semver!!!"),
+            "error must name the corrupt row: {msg}"
+        );
+        assert!(
+            msg.contains("corrupt"),
+            "error must identify corruption: {msg}"
+        );
+    }
+
+    #[test]
     #[cfg(unix)]
     fn enforces_unix_file_and_directory_permissions() {
         use std::os::unix::fs::PermissionsExt;
@@ -1627,6 +1715,39 @@ mod tests {
     }
 
     #[test]
+    fn provenance_cache_ttl_is_seven_days() {
+        // The TTL is what bounds how long a provenance row can stand in for a
+        // live registry check. Pin it to a literal so an arithmetic change to
+        // the constant (7 * 24 * 60 * 60) is caught, not re-derived.
+        let dir = tempfile::tempdir().unwrap();
+        let store = BaselineStore::open_at(&dir.path().join("t.db")).unwrap();
+        store
+            .record_provenance(
+                Ecosystem::Npm,
+                "pkg",
+                "1.0.0",
+                "sha512:deadbeef",
+                Some("https://github.com/actions/runner"),
+                Some("https://github.com/org/repo"),
+                Some("abc123sha"),
+                Some(".github/workflows/release.yml"),
+                3,
+                true,
+            )
+            .unwrap();
+        let prov = store
+            .get_cached_provenance(Ecosystem::Npm, "pkg", "1.0.0")
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            prov.expires_at - prov.verified_at,
+            604_800,
+            "the provenance cache TTL must stay 7 days"
+        );
+        assert!(!prov.is_expired, "a fresh row must not read as expired");
+    }
+
+    #[test]
     fn provenance_cache_roundtrip() {
         let dir = tempfile::tempdir().unwrap();
         let store = BaselineStore::open_at(&dir.path().join("t.db")).unwrap();
@@ -1643,6 +1764,7 @@ mod tests {
                 Ecosystem::Npm,
                 "pkg",
                 "1.0.0",
+                "sha512:deadbeef",
                 Some("https://github.com/actions/runner"),
                 Some("https://github.com/org/repo"),
                 Some("abc123sha"),
@@ -1671,6 +1793,8 @@ mod tests {
         );
         assert_eq!(prov.slsa_level, 3);
         assert!(prov.signature_valid);
+        assert_eq!(prov.subject_digest, "sha512:deadbeef");
+        assert!(!prov.is_expired);
     }
 
     #[test]

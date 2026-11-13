@@ -139,9 +139,14 @@ pub fn evaluate_with_trust(
     if let Some(adv_rep) = advisories {
         for hit in &adv_rep.hits {
             if hit.is_malware {
+                let severity = if policy.advisories.block_on_malware {
+                    VerdictBand::Block
+                } else {
+                    hit.severity
+                };
                 findings.push(Finding {
                     rule_id: "R09_ADVISORY_MALWARE".into(),
-                    severity: VerdictBand::Block,
+                    severity,
                     title: format!("Known malware advisory: {}", hit.id),
                     description: hit.summary.clone(),
                 });
@@ -165,6 +170,27 @@ pub fn evaluate_with_trust(
 
     if let Some(prov_rep) = provenance {
         findings.extend(provenance_findings(prov_rep, policy));
+    } else {
+        let provenance_required =
+            policy.policy.require_provenance || policy.provenance.require_provenance;
+        let provenance_constraints_active = provenance_required
+            || !policy.provenance.allowed_repositories.is_empty()
+            || !policy.provenance.allowed_builders.is_empty();
+        if provenance_constraints_active {
+            let lane = ecosystem.key();
+            findings.push(Finding {
+                rule_id: "P03_PROVENANCE_UNEVALUABLE".into(),
+                severity: VerdictBand::Low,
+                title: format!("Provenance policy could not be applied on the {lane} lane"),
+                description: format!(
+                    "blueline.toml enables provenance controls (require_provenance, \
+                     allowed_repositories, or allowed_builders), but the {lane} lane does \
+                     not supply provenance data to evaluate them. This is disclosed and the \
+                     verdict is not blocked by this finding; treat the release as unreviewed by \
+                     those controls."
+                ),
+            });
+        }
     }
 
     // R01: Lifecycle scripts
@@ -1773,6 +1799,46 @@ fn normalize_repo_uri(mut s: &str) -> &str {
 
 /// Check if a provenance repository matches an allowed repository pattern on path boundaries.
 pub fn is_repo_allowed(provenance_repo: &str, allowed_pattern: &str) -> bool {
+    fn split_host_path(s: &str) -> (&str, &str) {
+        let slash = s.find('/');
+        let colon = s.find(':');
+        match (slash, colon) {
+            (Some(slash_pos), Some(colon_pos)) if colon_pos < slash_pos => {
+                let between = &s[colon_pos + 1..slash_pos];
+                if !between.is_empty() && between.bytes().all(|b| b.is_ascii_digit()) {
+                    (&s[..slash_pos], &s[slash_pos + 1..])
+                } else {
+                    (&s[..colon_pos], &s[colon_pos + 1..])
+                }
+            }
+            (Some(slash_pos), _) => (&s[..slash_pos], &s[slash_pos + 1..]),
+            (None, Some(colon_pos)) => (&s[..colon_pos], &s[colon_pos + 1..]),
+            (None, None) => ("", s),
+        }
+    }
+
+    fn eq_or_deeper(repo_path: &str, pattern_path: &str) -> bool {
+        if repo_path.eq_ignore_ascii_case(pattern_path) {
+            return true;
+        }
+        repo_path.len() > pattern_path.len()
+            && repo_path.as_bytes()[pattern_path.len()] == b'/'
+            && repo_path[..pattern_path.len()].eq_ignore_ascii_case(pattern_path)
+    }
+
+    fn eq_or_suffix_boundary(repo_path: &str, pattern_path: &str) -> bool {
+        if eq_or_deeper(repo_path, pattern_path) {
+            return true;
+        }
+        if repo_path.len() > pattern_path.len() {
+            let start = repo_path.len() - pattern_path.len();
+            let boundary = repo_path.as_bytes()[start - 1];
+            return (boundary == b'/' || boundary == b':')
+                && repo_path[start..].eq_ignore_ascii_case(pattern_path);
+        }
+        false
+    }
+
     let norm_repo = normalize_repo_uri(provenance_repo);
     let norm_pattern = normalize_repo_uri(allowed_pattern);
 
@@ -1780,13 +1846,22 @@ pub fn is_repo_allowed(provenance_repo: &str, allowed_pattern: &str) -> bool {
         return true;
     }
 
-    if let Some(stripped) = norm_repo.strip_suffix(norm_pattern)
-        && (stripped.ends_with('/') || stripped.ends_with(':'))
-    {
-        return true;
-    }
+    let (repo_host, repo_path) = split_host_path(norm_repo);
+    let (pattern_host, pattern_path) = split_host_path(norm_pattern);
+    let pattern_has_host =
+        !pattern_host.is_empty() && (pattern_host.contains('.') || pattern_host.contains(':'));
 
-    false
+    if pattern_has_host {
+        if repo_host.is_empty() || !repo_host.eq_ignore_ascii_case(pattern_host) {
+            return false;
+        }
+        eq_or_deeper(repo_path, pattern_path)
+    } else if repo_host.is_empty() {
+        eq_or_suffix_boundary(repo_path, norm_pattern)
+    } else {
+        eq_or_suffix_boundary(repo_path, norm_pattern)
+            || eq_or_suffix_boundary(norm_repo, norm_pattern)
+    }
 }
 
 /// Suffix appended to a non-registry dependency finding that
@@ -3005,6 +3080,146 @@ mod tests {
     }
 
     #[test]
+    fn cargo_provenance_controls_emit_low_disclosure_when_unevaluable() {
+        let mut policy = Policy::default();
+        policy.policy.require_provenance = true;
+        let verdict = evaluate_with_trust(
+            "serde",
+            Ecosystem::Cargo,
+            "verified (sha256)",
+            &Delta::default(),
+            false,
+            false,
+            None,
+            false,
+            None,
+            false,
+            None,
+            &policy,
+            None,
+            None,
+        );
+        let disclosure = verdict
+            .findings
+            .iter()
+            .find(|f| f.rule_id == "P03_PROVENANCE_UNEVALUABLE")
+            .unwrap_or_else(|| panic!("expected unevaluable disclosure: {:?}", verdict.findings));
+        assert_eq!(disclosure.severity, VerdictBand::Low);
+        assert!(
+            disclosure.title.contains("cargo"),
+            "disclosure should name the lane: {}",
+            disclosure.title
+        );
+        assert!(
+            verdict.band < VerdictBand::Block,
+            "unevaluable provenance on cargo must not block: {:?}",
+            verdict.band
+        );
+    }
+
+    #[test]
+    fn cargo_without_provenance_controls_emits_no_disclosure() {
+        let verdict = evaluate_with_trust(
+            "serde",
+            Ecosystem::Cargo,
+            "verified (sha256)",
+            &Delta::default(),
+            false,
+            false,
+            None,
+            false,
+            None,
+            false,
+            None,
+            &Policy::default(),
+            None,
+            None,
+        );
+        assert!(
+            verdict
+                .findings
+                .iter()
+                .all(|f| f.rule_id != "P03_PROVENANCE_UNEVALUABLE"),
+            "no controls active means no disclosure: {:?}",
+            verdict.findings
+        );
+    }
+
+    #[test]
+    fn aur_allowed_repositories_control_emits_low_disclosure_when_unevaluable() {
+        let mut policy = Policy::default();
+        policy.provenance.allowed_repositories = vec!["github.com/example/repo".into()];
+        let verdict = evaluate_with_trust(
+            "yay",
+            Ecosystem::Aur,
+            "verified (sha256)",
+            &Delta::default(),
+            false,
+            false,
+            None,
+            false,
+            None,
+            false,
+            None,
+            &policy,
+            None,
+            None,
+        );
+        let disclosure = verdict
+            .findings
+            .iter()
+            .find(|f| f.rule_id == "P03_PROVENANCE_UNEVALUABLE")
+            .unwrap_or_else(|| panic!("expected unevaluable disclosure: {:?}", verdict.findings));
+        assert_eq!(disclosure.severity, VerdictBand::Low);
+        assert!(
+            verdict.band < VerdictBand::Block,
+            "unevaluable provenance on aur must not block: {:?}",
+            verdict.band
+        );
+    }
+
+    #[test]
+    fn npm_with_provenance_present_has_no_unevaluable_disclosure() {
+        let mut policy = Policy::default();
+        policy.policy.require_provenance = true;
+        let report = crate::provenance::ProvenanceReport {
+            status: crate::provenance::ProvenanceStatus::CryptographicallyVerified,
+            slsa_level: 1,
+            builder_id: Some("https://github.com/actions/runner".into()),
+            source_repo: Some("git+https://github.com/acme/pkg".into()),
+            commit_sha: Some("a".repeat(40)),
+            workflow_path: Some(".github/workflows/release.yml".into()),
+            registry_signature_present: true,
+            registry_signature_key_id: None,
+            message: None,
+        };
+        let verdict = evaluate_with_trust(
+            "pkg",
+            Ecosystem::Npm,
+            "verified (sha512)",
+            &Delta::default(),
+            false,
+            false,
+            None,
+            false,
+            None,
+            false,
+            None,
+            &policy,
+            None,
+            Some(&report),
+        );
+        assert!(
+            verdict
+                .findings
+                .iter()
+                .all(|f| f.rule_id != "P03_PROVENANCE_UNEVALUABLE"),
+            "npm with provenance present must not emit unevaluable: {:?}",
+            verdict.findings
+        );
+    }
+
+    #[test]
     fn attestation_disclosure_cannot_move_the_verdict() {
         let policy = Policy::default();
         let report = crate::provenance::ProvenanceReport {
@@ -3733,6 +3948,74 @@ mod tests {
     }
 
     #[test]
+    fn block_on_malware_flag_false_uses_advisory_severity() {
+        let delta = Delta {
+            baseline_version: Some("1.0.0".into()),
+            target_version: "1.0.1".into(),
+            files_added: vec![],
+            files_removed: vec![],
+            files_modified: vec![],
+            total_lines_added: 0,
+            total_lines_deleted: 0,
+            new_executables: vec![],
+            new_binaries: vec![],
+            modified_binaries: vec![],
+            new_lifecycle_scripts: vec![],
+            modified_lifecycle_scripts: vec![],
+            new_dependencies: vec![],
+            modified_dependencies: vec![],
+            binding_gyp_added: false,
+            removed_dependencies: Vec::new(),
+        };
+
+        let adv = AdvisoryReport {
+            status: crate::advisory::AdvisoryStatus::Vulnerable,
+            hits: vec![crate::advisory::AdvisoryItem {
+                id: "MAL-2026-9999".into(),
+                summary: "Credential stealer in package".into(),
+                details: "".into(),
+                aliases: vec![],
+                severity: VerdictBand::High,
+                cvss_score: None,
+                is_malware: true,
+            }],
+            source: "osv.dev".into(),
+            message: None,
+        };
+
+        let mut policy = Policy::default();
+        policy.advisories.block_on_malware = false;
+        let verdict = evaluate_with_trust(
+            "pkg",
+            Ecosystem::Npm,
+            "verified (sha512)",
+            &delta,
+            false,
+            false,
+            None,
+            false,
+            None,
+            false,
+            None,
+            &policy,
+            Some(&adv),
+            None,
+        );
+
+        assert_ne!(
+            verdict.band,
+            VerdictBand::Block,
+            "block_on_malware=false must not force a Block: {verdict:?}"
+        );
+        let malware = verdict
+            .findings
+            .iter()
+            .find(|f| f.rule_id == "R09_ADVISORY_MALWARE")
+            .expect("malware finding must still be reported");
+        assert_eq!(malware.severity, VerdictBand::High);
+    }
+
+    #[test]
     fn blocks_on_critical_cve_advisory() {
         let delta = Delta {
             baseline_version: Some("1.0.0".into()),
@@ -3968,6 +4251,18 @@ mod tests {
             "org/app"
         ));
         assert!(is_repo_allowed("https://github.com/org/app", "org/app"));
+        assert!(is_repo_allowed(
+            "http://github.com/org/app",
+            "github.com/org/app"
+        ));
+        assert!(is_repo_allowed(
+            "ssh://git@github.com/org/app.git",
+            "github.com/org/app"
+        ));
+        assert!(is_repo_allowed(
+            "https://github.com/org/app/subdir",
+            "github.com/org/app"
+        ));
 
         // Reject prefix / suffix / substring spoofing
         assert!(!is_repo_allowed(
@@ -3982,6 +4277,88 @@ mod tests {
             "https://github.com/attacker/org/app",
             "github.com/org/app"
         ));
+        assert!(!is_repo_allowed(
+            "https://evil.com/github.com/org/app",
+            "github.com/org/app"
+        ));
+
+        // A colon before the first slash can mean host:port or scp-style host:path.
+        // Digits between them indicate a port, so the path starts after the slash.
+        assert!(is_repo_allowed(
+            "https://github.com:443/org/app.git",
+            "github.com:443/org/app"
+        ));
+        assert!(!is_repo_allowed(
+            "https://github.com:443/org/app.git",
+            "github.com/org/app"
+        ));
+
+        // Non-numeric text between colon and slash is scp-style, so the path starts
+        // after the colon (not the slash).
+        assert!(is_repo_allowed(
+            "git@github.com:org/app.git",
+            "github.com/org/app"
+        ));
+        assert!(is_repo_allowed(
+            "git@github.com:org/app.git",
+            "github.com/org"
+        ));
+        assert!(!is_repo_allowed(
+            "git@github.com:org/app.git",
+            "github.com/org2"
+        ));
+
+        // A colon after the first slash is not a port, so the host must be
+        // split at the slash. Reading it as host:port would slice backwards
+        // and panic, so this pins the guard's direction.
+        assert!(!is_repo_allowed(
+            "https://example.com/foo:1234",
+            "example.com/x"
+        ));
+
+        // A port belongs to the host, not the path: a pattern whose path
+        // starts with the port digits must not match, whatever the split
+        // arithmetic does with the colon offset.
+        assert!(!is_repo_allowed(
+            "https://github.com:443/org/app",
+            "github.com/443/org"
+        ));
+
+        // An empty port (`host:/path`) leaves the host intact — the colon
+        // stays attached to it. Here the repo path keeps its leading slash
+        // while the pattern path (`//rest`) has one too, so they line up
+        // exactly; detaching the colon would break the host match.
+        assert!(is_repo_allowed(
+            "https://github.com:/rest",
+            "github.com//rest"
+        ));
+
+        // Equal-length paths that differ must not compare past their end,
+        // and the suffix-boundary arithmetic must not index before the
+        // start of the path when lengths are equal or the pattern is
+        // longer.
+        assert!(!is_repo_allowed("https://github.com/aaa", "github.com/bbb"));
+        assert!(!is_repo_allowed("aaa", "bbb"));
+        assert!(!is_repo_allowed("ab", "abcd"));
+
+        // A bare path pattern matches at a boundary inside the repo path,
+        // and a pattern that only spans the host:port junction matches the
+        // full normalized URI. Both are what the boundary arithmetic earns.
+        assert!(is_repo_allowed("https://example.com/ab/cd", "cd"));
+        assert!(is_repo_allowed(
+            "https://example.com:8080/org/app",
+            "8080/org/app"
+        ));
+
+        // The path after a port starts strictly after the slash: it must not
+        // absorb the slash (or the port's last digit) into itself, which
+        // would let a repo path line up with a pattern it never named.
+        assert!(!is_repo_allowed("https://github.com:443/app", "/app"));
+        assert!(!is_repo_allowed("https://github.com:443/app", "3/app"));
+
+        // A colon with no slash at all is scp-style host:path; the path
+        // starts after the colon, keeping the colon on the host side.
+        assert!(is_repo_allowed("git@github.com:app", "github.com/app"));
     }
 
     #[test]

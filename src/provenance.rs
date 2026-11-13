@@ -180,6 +180,14 @@ struct InTotoConfigSource {
     entry_point: Option<String>,
 }
 
+fn subject_digest_string(expected_integrity: &crate::registry::Checksum) -> String {
+    format!(
+        "{}:{}",
+        expected_integrity.alg.name(),
+        expected_integrity.value_hex
+    )
+}
+
 /// Parse and verify a Sigstore / SLSA in-toto statement against the tarball
 /// checksum. The subject digest must equal the expected digest content
 /// (case-insensitive hex) for the checksum's algorithm.
@@ -264,9 +272,13 @@ pub fn inspect_provenance(
             )
         });
 
-    // 2. Check local provenance cache
+    // 2. Check local provenance cache, bound to the artifact digest and
+    // bounded by TTL. A different digest or an expired row is re-verified.
+    let expected_digest = subject_digest_string(expected_integrity);
     if let Some(store) = store
         && let Ok(Some(cached)) = store.get_cached_provenance(Ecosystem::Npm, package, version)
+        && !cached.is_expired
+        && cached.subject_digest == expected_digest
     {
         return ProvenanceReport {
             status: ProvenanceStatus::Attested,
@@ -374,6 +386,7 @@ pub fn inspect_provenance(
                                     Ecosystem::Npm,
                                     package,
                                     version,
+                                    &expected_digest,
                                     report.builder_id.as_deref(),
                                     report.source_repo.as_deref(),
                                     report.commit_sha.as_deref(),
@@ -543,9 +556,12 @@ pub fn inspect_provenance_pypi(
 ) -> ProvenanceReport {
     let norm = crate::version::canonicalize_name(package);
 
-    // 1. Check local cache
+    // 1. Check local cache, bound to the artifact digest and bounded by TTL.
+    let expected_digest = subject_digest_string(expected_integrity);
     if let Some(store) = store
         && let Ok(Some(cached)) = store.get_cached_provenance(Ecosystem::PyPi, package, version)
+        && !cached.is_expired
+        && cached.subject_digest == expected_digest
     {
         return ProvenanceReport {
             status: ProvenanceStatus::Attested,
@@ -615,6 +631,7 @@ pub fn inspect_provenance_pypi(
                     Ecosystem::PyPi,
                     package,
                     version,
+                    &expected_digest,
                     report.builder_id.as_deref(),
                     report.source_repo.as_deref(),
                     report.commit_sha.as_deref(),
@@ -1402,5 +1419,226 @@ mod tests {
     fn the_attestation_body_cap_is_one_mebibyte() {
         assert_eq!(MAX_ATTESTATION_BYTES, 1024 * 1024);
         assert_eq!(MAX_ATTESTATION_BYTES, 1_048_576);
+    }
+
+    #[test]
+    fn provenance_cache_hit_with_different_digest_reverifies_npm() {
+        let cached_digest = ck("cached");
+        let reviewed_digest = ck("different");
+        let dir = tempfile::tempdir().unwrap();
+        let store = BaselineStore::open_at(&dir.path().join("blueline.db")).unwrap();
+        store
+            .record_provenance(
+                Ecosystem::Npm,
+                "lodash",
+                "4.17.20",
+                &format!("{}:{}", cached_digest.alg.name(), cached_digest.value_hex),
+                Some("https://github.com/actions/runner"),
+                Some("https://github.com/lodash/lodash"),
+                Some("deadbeef"),
+                Some(".github/workflows/w.yml"),
+                3,
+                false,
+            )
+            .unwrap();
+
+        // 404 means the registry says no attestation exists; if the stale-bound
+        // cache row were trusted we would return Attested instead.
+        let server = provenance_status_server("HTTP/1.1 404 Not Found", "{}");
+        let report = inspect_provenance(
+            "lodash",
+            "4.17.20",
+            &reviewed_digest,
+            None,
+            &server,
+            Some(&store),
+            &Policy::default(),
+        );
+        assert_eq!(
+            report.status,
+            ProvenanceStatus::Missing,
+            "a digest-mismatched cache row must not be trusted: {report:?}"
+        );
+        assert!(
+            report.message.as_deref().unwrap_or("").contains("No SLSA"),
+            "must reflect re-verification, not a cached attestation: {report:?}"
+        );
+    }
+
+    #[test]
+    fn stale_provenance_cache_row_reverifies_npm() {
+        let digest = ck("same");
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("blueline.db");
+        let store = BaselineStore::open_at(&db).unwrap();
+        let digest_str = format!("{}:{}", digest.alg.name(), digest.value_hex);
+        store
+            .record_provenance(
+                Ecosystem::Npm,
+                "lodash",
+                "4.17.20",
+                &digest_str,
+                Some("https://github.com/actions/runner"),
+                Some("https://github.com/lodash/lodash"),
+                Some("deadbeef"),
+                Some(".github/workflows/w.yml"),
+                3,
+                false,
+            )
+            .unwrap();
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        conn.execute(
+            "UPDATE provenance_cache SET verified_at = 1, expires_at = 1
+             WHERE ecosystem = 'npm' AND package = 'lodash' AND version = '4.17.20'",
+            [],
+        )
+        .unwrap();
+
+        let server = provenance_status_server("HTTP/1.1 404 Not Found", "{}");
+        let report = inspect_provenance(
+            "lodash",
+            "4.17.20",
+            &digest,
+            None,
+            &server,
+            Some(&store),
+            &Policy::default(),
+        );
+        assert_eq!(
+            report.status,
+            ProvenanceStatus::Missing,
+            "an expired cache row must not be trusted: {report:?}"
+        );
+    }
+
+    #[test]
+    fn provenance_cache_hit_with_different_digest_reverifies_pypi() {
+        let cached_digest = ck("cached");
+        let reviewed_digest = ck("different");
+        let dir = tempfile::tempdir().unwrap();
+        let store = BaselineStore::open_at(&dir.path().join("blueline.db")).unwrap();
+        store
+            .record_provenance(
+                Ecosystem::PyPi,
+                "requests",
+                "2.31.0",
+                &format!("{}:{}", cached_digest.alg.name(), cached_digest.value_hex),
+                Some("https://github.com/actions/runner"),
+                Some("https://github.com/psf/requests"),
+                Some("deadbeef"),
+                Some(".github/workflows/w.yml"),
+                3,
+                false,
+            )
+            .unwrap();
+
+        // 404 means no attestation exists; if the digest-mismatched cache row
+        // were trusted we would return Attested instead.
+        let server = provenance_status_server("HTTP/1.1 404 Not Found", "{}");
+        let report = inspect_provenance_pypi(
+            "requests",
+            "2.31.0",
+            "requests-2.31.0-py3-none-any.whl",
+            &reviewed_digest,
+            &server,
+            Some(&store),
+            &Policy::default(),
+        );
+        assert_eq!(
+            report.status,
+            ProvenanceStatus::Missing,
+            "a digest-mismatched pypi cache row must not be trusted: {report:?}"
+        );
+    }
+
+    #[test]
+    fn stale_provenance_cache_row_reverifies_pypi() {
+        let digest = ck("same");
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("blueline.db");
+        let store = BaselineStore::open_at(&db).unwrap();
+        let digest_str = format!("{}:{}", digest.alg.name(), digest.value_hex);
+        store
+            .record_provenance(
+                Ecosystem::PyPi,
+                "requests",
+                "2.31.0",
+                &digest_str,
+                Some("https://github.com/actions/runner"),
+                Some("https://github.com/psf/requests"),
+                Some("deadbeef"),
+                Some(".github/workflows/w.yml"),
+                3,
+                false,
+            )
+            .unwrap();
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        conn.execute(
+            "UPDATE provenance_cache SET verified_at = 1, expires_at = 1
+             WHERE ecosystem = 'pypi' AND package = 'requests' AND version = '2.31.0'",
+            [],
+        )
+        .unwrap();
+
+        let server = provenance_status_server("HTTP/1.1 404 Not Found", "{}");
+        let report = inspect_provenance_pypi(
+            "requests",
+            "2.31.0",
+            "requests-2.31.0-py3-none-any.whl",
+            &digest,
+            &server,
+            Some(&store),
+            &Policy::default(),
+        );
+        assert_eq!(
+            report.status,
+            ProvenanceStatus::Missing,
+            "an expired pypi cache row must not be trusted: {report:?}"
+        );
+    }
+
+    #[test]
+    fn provenance_cache_happy_hit_still_works_npm() {
+        let digest = ck("same");
+        let dir = tempfile::tempdir().unwrap();
+        let store = BaselineStore::open_at(&dir.path().join("blueline.db")).unwrap();
+        let digest_str = format!("{}:{}", digest.alg.name(), digest.value_hex);
+        store
+            .record_provenance(
+                Ecosystem::Npm,
+                "lodash",
+                "4.17.20",
+                &digest_str,
+                Some("https://github.com/actions/runner"),
+                Some("https://github.com/lodash/lodash"),
+                Some("deadbeef"),
+                Some(".github/workflows/w.yml"),
+                3,
+                true,
+            )
+            .unwrap();
+
+        // A 500 would force an unverified/error path if fetched; cache hit must
+        // return the cached attestation without consulting the server.
+        let server =
+            provenance_status_server("HTTP/1.1 500 Internal Server Error", r#"{"error":"boom"}"#);
+        let report = inspect_provenance(
+            "lodash",
+            "4.17.20",
+            &digest,
+            None,
+            &server,
+            Some(&store),
+            &Policy::default(),
+        );
+        assert_eq!(
+            report.status,
+            ProvenanceStatus::Attested,
+            "a fresh digest-matching cache row must be reused: {report:?}"
+        );
+        assert!(
+            report.registry_signature_present,
+            "cached signature validity must be preserved: {report:?}"
+        );
     }
 }

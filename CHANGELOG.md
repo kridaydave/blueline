@@ -53,6 +53,87 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 - **Gate four integration tests on Unix so the cross-platform test matrix passes on Windows.** `recall_export_osv_refuses_symlink_out`, `install_delegates_to_npm_with_ignore_scripts`, `shim_installs_gates_and_uninstalls` and `shim_fails_closed_when_the_baked_blueline_binary_is_missing` either create or execute on-disk `#!/bin/sh` scripts / symlinks that Windows cannot create or exec, so they now run only on Unix like the other platform-specific tests in the suite.
 
+- **Blocklist and binary-allowance glob patterns with unsupported `*` placement now fail at load.**
+  Interior or multi-star shapes that `glob_match` cannot interpret (e.g.
+  `evil-*-pkg`) are refused when the policy loads, naming the pattern and the
+  supported forms (`exact`, `prefix*`, `*suffix`, `*middle*`, `*`). A
+  silently-ignored blocklist glob is a fail-open control
+  (`policy::tests::blocklist_glob_interior_star_is_rejected_at_load`,
+  `policy::tests::allowed_new_binary_paths_rejects_unsupported_glob`).
+
+- **Active provenance controls no longer stay inert on Cargo and AUR lanes.**
+  When `require_provenance`, `allowed_repositories`, or `allowed_builders` is
+  active but the lane supplies no provenance data, the heuristic emits
+  `P03_PROVENANCE_UNEVALUABLE` (LOW, non-blocking) naming the lane instead of
+  silently skipping evaluation; with no controls active, nothing is emitted
+  (`heuristic::tests::cargo_provenance_controls_emit_low_disclosure_when_unevaluable`,
+  `heuristic::tests::cargo_without_provenance_controls_emits_no_disclosure`,
+  `heuristic::tests::aur_allowed_repositories_control_emits_low_disclosure_when_unevaluable`).
+
+- **Duplicate `requirements.txt` pins for one canonical package no longer overwrite.**
+  Differing duplicates (version or integrity) return `LockfileError::InvalidData`
+  naming the package, refusing to review a requirements file whose package graph
+  is ambiguous; case-variant identical pins (same version+integrity) dedupe to
+  one entry
+  (`lockfile::tests::requirements_duplicate_differing_pins_are_refused`,
+  `lockfile::tests::requirements_case_variant_same_version_dedupes`).
+
+- **npm v1 lockfile depth overflow and missing-version entries now fail closed.**
+  `walk_v1_dependencies` no longer silently truncates nesting past
+  `MAX_LOCKFILE_RECURSION_DEPTH` (32) or drops entries with no version; both
+  return `LockfileError::InvalidData` naming the path, refusing to review a
+  lockfile whose dependency graph would otherwise shrink
+  (`lockfile::tests::v1_recursion_depth_overflow_is_refused`,
+  `lockfile::tests::v1_missing_version_is_refused`).
+
+- **npm lockfile paths that normalize to the same package key no longer overwrite.**
+  v2/v3 entries whose raw paths normalize to one key (e.g. `./node_modules/x`
+  and `node_modules/x`) are refused when they describe different entries, naming
+  both raw paths; byte-identical duplicates dedupe silently
+  (`lockfile::tests::npm_normalized_path_collision_with_differing_entries_is_refused`,
+  `lockfile::tests::npm_normalized_single_entry_unaffected_by_collision_check`,
+  `lockfile::tests::npm_normalized_path_identical_duplicates_dedupe_silently`).
+
+- **Provenance `allowed_repositories` no longer accepts a spoofed host prefix.**
+  `is_repo_allowed` required only that the normalized repository ended with the
+  allowed pattern at a `/` or `:` boundary, so `evil.com/github.com/org/app`
+  satisfied `github.com/org/app`. Host-qualified patterns now require host
+  equality before path matching; path-only patterns keep boundary matching
+  (`heuristic::tests::enforces_repository_boundary_matching`).
+
+- **The pip install gate now denies dangerous source flags anywhere on the line.**
+  `pip_non_registry_shape` scanned only after `install`/`i`, so
+  `pip --index-url=… install x` and `pip -r reqs.txt install x` bypassed the
+  hard deny while the same flags after `install` were blocked. The dangerous
+  flag list is now matched position-independently for pip install invocations
+  (`install_ref::tests::pip_gate_denies_dangerous_flags_before_install`,
+  `install_ref::tests::gate_hard_denies_pip_non_registry_shapes`).
+
+- **Cached provenance is now bound to the verified subject digest and expires.**
+  A provenance cache hit for the same `ecosystem, package, version` reused the
+  cached attestation without checking the artifact digest or `verified_at`, so a
+  different digest or a stale answer could be trusted. Cache rows now store the
+  verified `subject_digest` and an `expires_at` (7 days, `PROVENANCE_CACHE_TTL_SECS`);
+  a digest mismatch or expired row is treated as a miss and re-verified. Existing
+  databases migrate in place with idempotent guarded `ALTER TABLE`s; `known_clean`
+  is unchanged
+  (`provenance::tests::provenance_cache_hit_with_different_digest_reverifies_npm`,
+  `provenance::tests::stale_provenance_cache_row_reverifies_npm`,
+  `provenance::tests::provenance_cache_happy_hit_still_works_npm`).
+
+- **`policy.advisories.block_on_malware = false` is now honored for malware advisories.**
+  The R09 malware-advisory arm always forced a `Block` verdict, ignoring the
+  policy flag. When `block_on_malware` is false the finding now uses the hit's
+  own severity; default-true behavior is unchanged
+  (`heuristic::tests::blocks_on_malware_advisory`,
+  `heuristic::tests::block_on_malware_flag_false_uses_advisory_severity`).
+
+- **A corrupt `known_clean` version row now fails closed.** `list_clean_versions`
+  silently dropped rows whose version string could not be parsed, masking trust-
+  anchor corruption. An unparseable version now returns `BluelineError::Store`
+  naming the package and row
+  (`store::tests::corrupt_known_clean_version_row_is_rejected`).
+
 - **rustls-webpki bumped to 0.103.16 and webpki-roots to 1.0.10**, clearing
   RUSTSEC-2026-0382 and RUSTSEC-2026-0381 (distrusted emSign intermediates;
   CVE-2026-111943). The fix ships the 8 `.spki.der` key blobs that motivated
@@ -206,7 +287,21 @@ Targeted at 0.4.0. This release is a behaviour change for anyone who set
   output) is excluded in CI with a documented reason. A fourth exclusion
   (`>` to `<` in `levenshtein_at_most_one`) joins them: the flipped guard
   is never taken, and the scan advances one index past the point where it
-  can match, so the shard times out instead of producing a verdict.
+  can match, so the shard times out instead of producing a verdict. A
+  fifth (`<` to `<=` in `is_repo_allowed::split_host_path`) is likewise
+  equivalent: the colon and the slash index distinct bytes of one string,
+  so the two positions can never be equal.
+
+- **The trust-fix sweep's own mutants are killed.** The PR-diff mutation
+  gate surfaced survivors in every unit this PR touches, and each now has
+  a test that fails with the mutant applied: `is_repo_allowed` boundary
+  arithmetic (colon-after-slash direction, the port staying on the host
+  side of the split, empty ports, equal-length and shorter-path indexing,
+  bare-path and host:port-junction suffix matches, scp-style colon-only
+  paths), the exact npm v1 recursion-depth boundary (32 parses, 33 is
+  refused), the pypi provenance cache refusing expired and
+  digest-mismatched rows, the seven-day provenance TTL pinned to a
+  literal, and the pip gate still requiring the `install` word.
 
 - **A review no longer waits for the advisory lookup to finish before it
   starts working.** `fetch_advisories` ran to completion inside the review,
