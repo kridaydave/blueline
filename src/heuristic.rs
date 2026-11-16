@@ -1188,43 +1188,35 @@ fn fold_char_code_calls(s: &str) -> String {
 }
 
 fn parse_code_point_args(s: &str) -> Option<(Vec<u32>, usize)> {
-    let bytes = s.as_bytes();
-    let mut i = 0;
+    // Each step consumes a prefix of `rest` and leaves the tail, so the loop
+    // always makes progress on its own terms. An index stepped by hand is only
+    // correct while every step moves forward, and an inverted step here does not
+    // fail: it spins on the same whitespace byte forever, which no test can
+    // report. Slicing cannot rewind.
+    let mut rest = s.trim_start();
     let mut codes = Vec::new();
     loop {
-        while i < bytes.len() && bytes[i].is_ascii_whitespace() {
-            i += 1;
-        }
-        if i >= bytes.len() {
-            return None;
-        }
-        let val = if bytes[i] == b'0' && i + 1 < bytes.len() && (bytes[i + 1] | 0x20) == b'x' {
-            i += 2;
-            let start = i;
-            while i < bytes.len() && bytes[i].is_ascii_hexdigit() {
-                i += 1;
-            }
-            if i == start {
-                return None;
-            }
-            u32::from_str_radix(&s[start..i], 16).ok()?
-        } else {
-            let start = i;
-            while i < bytes.len() && bytes[i].is_ascii_digit() {
-                i += 1;
-            }
-            if i == start {
-                return None;
-            }
-            s[start..i].parse::<u32>().ok()?
-        };
-        codes.push(val);
-        while i < bytes.len() && bytes[i].is_ascii_whitespace() {
-            i += 1;
-        }
-        match bytes.get(i) {
-            Some(b',') => i += 1,
-            Some(b')') => return Some((codes, i + 1)),
+        let (digits, radix, tail) =
+            match rest.strip_prefix("0x").or_else(|| rest.strip_prefix("0X")) {
+                Some(after_prefix) => {
+                    let len = after_prefix
+                        .chars()
+                        .take_while(|c| c.is_ascii_hexdigit())
+                        .count();
+                    (after_prefix.get(..len)?, 16, after_prefix.get(len..)?)
+                }
+                None => {
+                    let len = rest.chars().take_while(|c| c.is_ascii_digit()).count();
+                    (rest.get(..len)?, 10, rest.get(len..)?)
+                }
+            };
+        // An empty digit run fails here rather than reading as zero.
+        codes.push(u32::from_str_radix(digits, radix).ok()?);
+        let after_value = tail.trim_start();
+        let (offset, separator) = (s.len() - after_value.len(), after_value.chars().next()?);
+        match separator {
+            ',' => rest = after_value[1..].trim_start(),
+            ')' => return Some((codes, offset + 1)),
             _ => return None,
         }
     }
@@ -4545,6 +4537,32 @@ mod tests {
         assert!(is_network_invocation(
             "require(String.fromCharCode(104,116,116,112))"
         ));
+    }
+
+    #[test]
+    fn code_point_args_are_read_to_the_closer_and_no_further() {
+        // A well formed list: every value, then the offset just past `)`.
+        assert_eq!(
+            parse_code_point_args("102,114,111,109)"),
+            Some((vec![102, 114, 111, 109], 16))
+        );
+        // Whitespace is allowed between values and before the closer.
+        assert_eq!(
+            parse_code_point_args(" 0x66 )"),
+            Some((vec![102], 7)),
+            "leading, trailing and interior whitespace all fold"
+        );
+        assert_eq!(parse_code_point_args("102 )"), Some((vec![102], 5)));
+        // A list that runs off the end has no closer, so it is not folded.
+        // Each of these stops exactly at the buffer end: reading one byte past
+        // it would panic, and reading the wrong byte would invent a list.
+        assert_eq!(parse_code_point_args("0"), None);
+        assert_eq!(parse_code_point_args("102"), None);
+        assert_eq!(parse_code_point_args("0x41"), None);
+        assert_eq!(parse_code_point_args("102 "), None);
+        assert_eq!(parse_code_point_args(""), None);
+        assert_eq!(parse_code_point_args(")"), None);
+        assert_eq!(parse_code_point_args("0x)"), None);
     }
 
     #[test]

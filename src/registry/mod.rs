@@ -414,6 +414,20 @@ mod tests {
     }
 
     #[test]
+    fn a_bare_digest_of_the_wrong_length_names_both_accepted_forms() {
+        // A 100-character bare token is neither digest. The refusal has to come
+        // from the length dispatch that tells an operator what was expected,
+        // not from the digest check inside one algorithm, which would report it
+        // as a malformed sha512 and hide that sha256 was also on the table.
+        let wrong = "ab".repeat(50);
+        let err = Checksum::parse(&wrong).unwrap_err().to_string();
+        assert!(
+            err.contains("sha256/sha512 hex digest") && err.contains("(got 100 chars)"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
     fn fails_closed_on_bad_checksum_input() {
         assert!(Checksum::parse("").is_err());
         assert!(Checksum::parse("sha1-YWJjZA==").is_err());

@@ -23,3 +23,6 @@ packages/@kridaydave/binary-*/blueline.exe
 # Python cache
 __pycache__/
 *.pyc
+
+# Local planning notes from editor agents
+.zcode/

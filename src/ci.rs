@@ -1191,8 +1191,23 @@ mod tests {
         assert!(!text.contains("pkg\nInjected"), "newline must not survive");
     }
 
+    /// `extract_base_lockfile` shells out to `git show` from the process cwd, so
+    /// these fixtures only mean anything inside a work tree. A source copy with
+    /// no `.git` (a mutation run, an sdist build) has no `HEAD` to read and no
+    /// base ref to miss, so the fixture would pass or fail for the wrong reason.
+    fn in_a_git_work_tree() -> bool {
+        std::process::Command::new("git")
+            .args(["rev-parse", "--is-inside-work-tree"])
+            .output()
+            .is_ok_and(|out| out.status.success())
+    }
+
     #[test]
     fn invalid_git_ref_fails_closed() {
+        if !in_a_git_work_tree() {
+            eprintln!("skipping: git fixtures need a work tree in the cwd");
+            return;
+        }
         let res = extract_base_lockfile(
             "-leading-hyphen",
             Path::new("package-lock.json"),
@@ -1213,6 +1228,10 @@ mod tests {
 
     #[test]
     fn cargo_missing_base_returns_empty_cargo_toml() {
+        if !in_a_git_work_tree() {
+            eprintln!("skipping: git fixtures need a work tree in the cwd");
+            return;
+        }
         let cargo_empty = extract_base_lockfile(
             "HEAD",
             Path::new("Cargo.lock.missing-for-test-xyz"),
