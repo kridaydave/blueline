@@ -168,12 +168,12 @@ fn decode_ansi_c(body: &str) -> Result<String, BluelineError> {
     Ok(String::from_utf8_lossy(&out).into_owned())
 }
 
-fn find_matching(input: &str, start: usize, open: char, close: char) -> Option<usize> {
+fn find_matching(input: &str, open: char, close: char) -> Option<usize> {
     let mut depth = 0usize;
     let mut in_single = false;
     let mut in_double = false;
     let mut escaped = false;
-    for (idx, ch) in input.char_indices().skip_while(|(i, _)| *i < start) {
+    for (idx, ch) in input.char_indices() {
         if escaped {
             escaped = false;
             continue;
@@ -826,7 +826,6 @@ pub fn parse_pkgbuild(input: &str) -> Result<FoldedPkgbuild, BluelineError> {
     let joined = join_continuations(input);
     let mut folded = FoldedPkgbuild {
         suspicious_unicode: contains_suspicious_unicode(input),
-        has_indirection: false,
         ..FoldedPkgbuild::default()
     };
     let mut raw_scalars: HashMap<String, String> = HashMap::new();
@@ -1223,7 +1222,7 @@ fn parse_assignment(code: &str) -> Result<Option<RawAssign>, BluelineError> {
     };
     let value = value.trim();
     if value.starts_with('(') {
-        let end = find_matching(value, 0, '(', ')')
+        let end = find_matching(value, '(', ')')
             .ok_or_else(|| pkgbuild_err(format!("unbalanced array in `{name}`")))?;
         let body = &value[1..end];
         let elements = split_array_elements(body)?;
@@ -1513,17 +1512,17 @@ fn split_brace_once(word: &str) -> Vec<String> {
     let mut depth = 0usize;
     let mut in_s = false;
     let mut in_d = false;
-    let inner_chars: Vec<char> = inner.chars().collect();
-    let mut k = 0;
-    while k < inner_chars.len() {
-        let ch = inner_chars[k];
+    // Consume by iterator rather than by index arithmetic, for the reason spelled
+    // out in the function-body scan below: the escape branch advances by two, and
+    // an inverted step rewinds onto the same character and never terminates. A
+    // hang is not a failing test and not a verdict.
+    let mut inner_chars = inner.chars().peekable();
+    while let Some(ch) = inner_chars.next() {
         if ch == '\\' && !in_s {
             current.push(ch);
-            if k + 1 < inner_chars.len() {
-                current.push(inner_chars[k + 1]);
-                k += 1;
+            if let Some(next) = inner_chars.next() {
+                current.push(next);
             }
-            k += 1;
             continue;
         }
         if in_s {
@@ -1531,7 +1530,6 @@ fn split_brace_once(word: &str) -> Vec<String> {
             if ch == '\'' {
                 in_s = false;
             }
-            k += 1;
             continue;
         }
         if in_d {
@@ -1539,7 +1537,6 @@ fn split_brace_once(word: &str) -> Vec<String> {
             if ch == '"' {
                 in_d = false;
             }
-            k += 1;
             continue;
         }
         match ch {
@@ -1564,7 +1561,6 @@ fn split_brace_once(word: &str) -> Vec<String> {
             }
             _ => current.push(ch),
         }
-        k += 1;
     }
     alternatives.push(current);
     if alternatives.len() < 2 {
@@ -3505,5 +3501,224 @@ mod tests {
             "the length operator inside a parameter expansion is not a comment"
         );
         assert_eq!(strip_comment("no comment here"), "no comment here");
+    }
+
+    // --- folding primitives -------------------------------------------------
+    //
+    // These helpers are the fold itself, and the rules read nothing but their
+    // output, so a mutant that survives here means a wrong fold ships silently.
+    // Each case below is a shell construct bash accepts and makepkg feeds to
+    // `split_words` / `split_brace_once` verbatim.
+
+    #[test]
+    fn split_words_consumes_escapes_and_stops_at_the_end() {
+        // A backslash outside quotes drops itself and keeps the next char.
+        assert_eq!(
+            split_words("x\\*y").unwrap(),
+            vec![WordPart::Literal("x*y".to_string())]
+        );
+        // A backslash at the very end has nothing to escape, so it stays.
+        assert_eq!(
+            split_words("x\\").unwrap(),
+            vec![WordPart::Literal("x\\".to_string())]
+        );
+        // An escaped quote outside quotes is a literal quote, not a delimiter.
+        assert_eq!(
+            split_words("a\\'b").unwrap(),
+            vec![WordPart::Literal("a'b".to_string())]
+        );
+        // A single quote with no closer is refused rather than swallowed.
+        assert!(split_words("'oops").is_err());
+        assert!(split_words("\"oops").is_err());
+        assert!(split_words("$'oops").is_err());
+    }
+
+    #[test]
+    fn split_words_treats_localized_dollar_quotes_as_tainted() {
+        // `$"..."` is a locale-translated string: the shell expands it and we
+        // cannot, so it is tainted and the scan must resume after the closer.
+        assert_eq!(
+            split_words("$\"abc\"").unwrap(),
+            vec![WordPart::Tainted],
+            "the closing quote must be consumed, not re-read as an opener"
+        );
+        assert_eq!(
+            split_words("x$\"abc\"y").unwrap(),
+            vec![
+                WordPart::Literal("x".to_string()),
+                WordPart::Tainted,
+                WordPart::Literal("y".to_string())
+            ]
+        );
+        assert_eq!(
+            split_words("$\"\"").unwrap(),
+            vec![WordPart::Tainted],
+            "an empty localized string is still tainted"
+        );
+        // A dollar at the very end has no following character to test, so it is
+        // a literal dollar rather than a read past the buffer.
+        assert_eq!(
+            split_words("x$").unwrap(),
+            vec![
+                WordPart::Literal("x".to_string()),
+                WordPart::Literal("$".to_string())
+            ]
+        );
+    }
+
+    #[test]
+    fn split_brace_once_leaves_quoted_and_escaped_commas_alone() {
+        // Only a comma at group depth zero and outside quotes separates.
+        assert_eq!(split_brace_once("x{a\\,b,c}"), vec!["xa\\,b", "xc"]);
+        assert_eq!(split_brace_once("x{'a,b',c}"), vec!["x'a,b'", "xc"]);
+        assert_eq!(split_brace_once("x{\"a,b\",c}"), vec!["x\"a,b\"", "xc"]);
+        // A backslash inside single quotes is literal in bash, so the quote
+        // still closes and the comma after it still separates.
+        assert_eq!(split_brace_once("x{'a\\'b,c}"), vec!["x'a\\'b", "xc"]);
+    }
+
+    #[test]
+    fn split_brace_once_respects_nesting_and_missing_braces() {
+        assert_eq!(split_brace_once("x{a,{b,c}}"), vec!["xa", "x{b,c}"]);
+        assert_eq!(split_brace_once("x{a,}"), vec!["xa", "x"]);
+        // One alternative is not a list: the word comes back untouched.
+        assert_eq!(split_brace_once("x{a}"), vec!["x{a}"]);
+        assert_eq!(split_brace_once("nobrace"), vec!["nobrace"]);
+        assert_eq!(split_brace_once("x{a,b"), vec!["x{a,b"]);
+        // A brace inside quotes is not a group at all.
+        assert_eq!(split_brace_once("x'{a,b}'"), vec!["x'{a,b}'"]);
+    }
+
+    #[test]
+    fn skip_balanced_counts_the_whole_closer() {
+        // `$((` closes with two characters, so the returned offset has to add
+        // both of them; treating the length as a multiplier lands two bytes
+        // short of the construct's end.
+        let chars: Vec<char> = "$((1))".chars().collect();
+        assert_eq!(
+            skip_balanced(&chars, 0, "$(( ".len(), "((", "))").unwrap(),
+            6,
+            "the offset must be past both closing parens"
+        );
+        let nested: Vec<char> = "$(( (1) ))".chars().collect();
+        assert_eq!(
+            skip_balanced(&nested, 0, "$(( ".len(), "((", "))").unwrap(),
+            nested.len(),
+            "nested parens are counted, and the offset is the full length"
+        );
+    }
+
+    #[test]
+    fn find_matching_keeps_quoted_closers_out_of_the_depth() {
+        // A closer inside quotes is content, not the end of the group.
+        assert_eq!(find_matching("('a)')", '(', ')'), Some(5));
+        // A backslash inside single quotes is literal in bash, so the quote
+        // still closes and the paren after it still ends the group.
+        assert_eq!(find_matching("('a\\')", '(', ')'), Some(5));
+        // A closer before any opener means this was never a group.
+        assert_eq!(find_matching(")x(", '(', ')'), None);
+        assert_eq!(find_matching("(unclosed", '(', ')'), None);
+    }
+
+    #[test]
+    fn resolve_word_enforces_the_folded_byte_cap() {
+        let at_cap = "x".repeat(MAX_FOLDED_BYTES);
+        assert_eq!(
+            resolve_word(&[WordPart::Literal(at_cap.clone())], &HashMap::new()),
+            FoldedValue::Known(at_cap),
+            "a value of exactly the cap is still folded"
+        );
+        let over_cap = "x".repeat(MAX_FOLDED_BYTES + 1);
+        assert_eq!(
+            resolve_word(&[WordPart::Literal(over_cap)], &HashMap::new()),
+            FoldedValue::Unknown,
+            "one byte past the cap is unknown"
+        );
+    }
+
+    #[test]
+    fn line_cap_is_exact() {
+        let at_cap = "\n".repeat(PKGBUILD_MAX_LINES);
+        assert_eq!(at_cap.lines().count(), PKGBUILD_MAX_LINES);
+        assert!(parse_pkgbuild(&at_cap).is_ok());
+        assert!(parse_pkgbuild(&format!("{at_cap}\n")).is_err());
+    }
+
+    #[test]
+    fn func_head_accepts_every_documented_head() {
+        assert_eq!(func_head("name() {"), Some(("name".to_string(), '{')));
+        assert_eq!(func_head("name () {"), Some(("name".to_string(), '{')));
+        assert_eq!(
+            func_head("name ( ) {"),
+            Some(("name".to_string(), '{')),
+            "whitespace between the parens is still an empty parameter list"
+        );
+        assert_eq!(func_head("name() ("), Some(("name".to_string(), '(')));
+        assert_eq!(
+            func_head("function name {"),
+            Some(("name".to_string(), '{'))
+        );
+        assert_eq!(
+            func_head("function name() {"),
+            Some(("name".to_string(), '{'))
+        );
+        assert_eq!(
+            func_head("package_foo-bar() {"),
+            Some(("package_foo-bar".to_string(), '{')),
+            "split-package function names carry hyphens"
+        );
+    }
+
+    #[test]
+    fn func_head_rejects_lookalikes() {
+        // `functionfoo` is one name, not the keyword followed by a head.
+        assert_eq!(func_head("functionfoo() {"), None);
+        assert_eq!(func_head("echo hi {"), None);
+        assert_eq!(func_head(""), None);
+    }
+
+    #[test]
+    fn ansi_c_truncated_escapes_fail_closed() {
+        // Both escapes take a fixed number of hex digits; a short tail must
+        // error rather than fold to whatever the partial digits happen to mean.
+        assert!(parse_pkgbuild("msg=$'\\xa'\n").is_err());
+        assert!(parse_pkgbuild("msg=$'\\u12'\n").is_err());
+        let err = parse_pkgbuild("msg=$'\\u12zz'\n").unwrap_err().to_string();
+        assert!(
+            err.contains("bad \\u escape"),
+            "the diagnostic must name the escape that failed, got: {err}"
+        );
+    }
+
+    #[test]
+    fn ansi_c_octal_stops_at_three_digits_or_the_first_non_octal() {
+        // `\08` is NUL then a literal `8`, not an invalid octal literal.
+        let folded = parse_pkgbuild("msg=$'\\08'\n").unwrap();
+        assert_eq!(known(&folded, "msg").as_deref(), Some("\u{0}8"));
+        // `\377` is one byte and one byte only: below the cap it folds.
+        let folded = parse_pkgbuild("msg=$'\\377'\n").unwrap();
+        assert_eq!(known(&folded, "msg").as_deref(), Some("\u{FFFD}"));
+    }
+
+    #[test]
+    fn function_bodies_end_at_their_own_closer() {
+        // A quote or brace inside a body must not stop the scan from finding the
+        // closer, and must not swallow what follows the function. A backslash in
+        // single quotes is literal, so it cannot escape the closing quote.
+        let cases = [
+            "build() {\n  x='a\\'\n}\npkgver=1.0\n",
+            "build() {\n  echo '}'\n}\npkgver=1.0\n",
+            "build() {\n  echo \"}\"\n}\npkgver=1.0\n",
+            "build() {\n  echo \"'\"\n}\npkgver=1.0\n",
+        ];
+        for content in cases {
+            let folded = parse_pkgbuild(content)
+                .unwrap_or_else(|e| panic!("{content:?} failed to parse: {e}"));
+            assert_eq!(
+                known(&folded, "pkgver").as_deref(),
+                Some("1.0"),
+                "the assignment after the function must still fold for {content:?}"
+            );
+        }
     }
 }

@@ -41,6 +41,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- **The parse-surface folds now have tests that pin the scan, not just the happy
+  path.** The nightly full-tree mutation run left 68 mutants alive across
+  `src/pkgbuild.rs`, `src/heuristic.rs` and `src/registry/mod.rs`. Nearly all
+  were boundary cases with no test of their own: a backslash at the end of a
+  word, an escaped comma inside `{a\,b,c}`, a truncated `$'\xa'` or `$'\u12'`,
+  `$'\08'` reading as NUL followed by a literal `8`, a `$'\377'` byte at the
+  one-byte cap, a quoted `}` inside a function body hiding the closer, a `#`
+  inside a parameter expansion, `functionfoo() {` being read as the keyword plus
+  a head, a bare 100-character digest refused for the wrong reason, and
+  `parse_code_point_args` reading one byte past the end of its buffer. Each is
+  now a named test that fails if the expression around it is mutated; the ones
+  that were provably equivalent are gone rather than excluded.
+
 - **PEP 440 parses whose canonical form exceeds 256 bytes are rejected.** Inputs
   longer than 256 bytes were already refused; normalization can canonicalize a
   shorter input into a longer one (`c` reads as `rc`, a bare `r<n>` reads as
@@ -146,6 +159,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   characters in `reason` or `id` is rejected during validation.
 
 ### Changed
+
+- **`split_brace_once` walks its inner span by iterator instead of a
+  hand-advanced index.** Its escape branch stepped by two, so an inverted step
+  rewound onto the same character and never terminated: a hang, not a failing
+  test, which is the same trap the function-body scan already documented. Two
+  neighbours lost dead weight at the same time. `find_matching` dropped its
+  `start` parameter, which only ever reached `0` and so could not skip anything,
+  and `parse_pkgbuild` dropped a `has_indirection: false` initializer that
+  `FoldedPkgbuild::default()` already supplies.
+
+- **The two `extract_base_lockfile` fixtures skip when the cwd is not a git work
+  tree.** They shell out to `git show` and read the result, so in a source copy
+  with no `.git` they asserted against a git failure instead of a missing lock
+  file. CI is always a work tree, so nothing it checks changed; a mutation run in
+  a copy now gets a skip it can see instead of a red baseline it cannot.
 
 - **`BaselineStore::clear_advisory_cache` no longer carries `#[allow(dead_code)]`.** The method is public and reachable, and the advisory-cache tests exercise it, so the allow was redundant.
 
