@@ -43,6 +43,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- **Dependency versions carrying new RustSec advisories are patched.** `zip`
+  9.0.4 → 9.0.5 (RUSTSEC-2026-0548, local-header names diverging from the
+  central directory in `ZipStreamReader`) and `url` 2.5.8 → 2.5.9
+  (RUSTSEC-2026-0592, stack overflow in `Url::origin()` on nested `blob:` URLs).
+  Blueline reads wheels through `ZipArchive`, never `ZipStreamReader`.
+
 - **The parse-surface folds now have tests that pin the scan, not just the happy
   path.** The nightly full-tree mutation run left 68 mutants alive across
   `src/pkgbuild.rs`, `src/heuristic.rs` and `src/registry/mod.rs`. Nearly all
