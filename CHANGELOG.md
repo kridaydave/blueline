@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-11-27
+
 ### Added
 
 - **CI inspectability overhaul.** GitHub Actions now publishes per-gate summaries and `blueline-gate-*` artifacts (`gate_summary.py`) for fmt, clippy, tests, workflow lint, references, supply-chain audit, and dogfood jobs, plus a `ci-triage` job that writes a fix-first summary (`P0` Rust gate → `P1` security/audit/mutation → `P2` workflow/docs → `P3` dogfood health → `P4` dogfood risk). Mutation shards emit `mutants-shard-summary.json` with pass outcomes/root-cause classes, keep the in-diff double pass inspectable, and both PR and push mutation runs now have aggregates. The composite action (`.github/actions/blueline-ci`) reports scan outputs/summary details, and `scripts/verify.sh` labels stages with CI categories/priorities and parity notes. `actionlint -shellcheck= -pyflakes=` runs clean on this workflow after dropping four empty `env:` blocks, which actionlint rejected as null.
@@ -40,6 +42,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   fuzz smoke locally.
 
 ### Fixed
+
+- **Dependency versions carrying new RustSec advisories are patched.** `zip`
+  9.0.4 → 9.0.5 (RUSTSEC-2026-0548, local-header names diverging from the
+  central directory in `ZipStreamReader`) and `url` 2.5.8 → 2.5.9
+  (RUSTSEC-2026-0592, stack overflow in `Url::origin()` on nested `blob:` URLs).
+  Blueline reads wheels through `ZipArchive`, never `ZipStreamReader`.
 
 - **The parse-surface folds now have tests that pin the scan, not just the happy
   path.** The nightly full-tree mutation run left 68 mutants alive across
